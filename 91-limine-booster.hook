@@ -1,0 +1,14 @@
+[Trigger]
+# This hook triggers when any package providing 'linux' is installed or upgraded.
+# This is a more robust approach than targeting a specific package name like 'linux-lts'.
+# It will work for 'linux', 'linux-lts', 'linux-zen', etc., as long as they
+# provide the virtual 'linux' package.
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/modules/*/vmlinuz
+
+[Action]
+Description = Updating Limine entry with Booster for a new kernel...
+When = PostTransaction
+Exec = /usr/bin/limine-booster-update

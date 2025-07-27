@@ -1,0 +1,199 @@
+#!/bin/bash
+#
+# limine-booster-update
+#
+# This script is designed to be run by a pacman hook. It automatically
+# generates a Booster image for a specified kernel package and updates a
+# corresponding entry in the Limine bootloader configuration.
+#
+# It reads its configuration from /etc/default/limine-booster.conf.
+#
+
+# --- Script Configuration ---
+# Exit immediately if a command exits with a non-zero status.
+# Treat unset variables as an error when substituting.
+# Pipelines return the exit status of the last command to exit with a non-zero status.
+set -euo pipefail
+
+# --- Global Constants ---
+readonly SCRIPT_NAME="limine-booster-manager"
+readonly CONFIG_PATH="/etc/default/limine-booster.conf"
+readonly LIMINE_CONFIG_PATH="/boot/limine.conf"
+
+# --- Logging Functions ---
+# Standardized logging to stdout and stderr.
+log_info() {
+    printf ">>> [%s] %s\n" "${SCRIPT_NAME}" "$1"
+}
+
+log_error() {
+    printf "!!! [%s] ERROR: %s\n" "${SCRIPT_NAME}" "$1" >&2
+    exit 1
+}
+
+# --- Core Functions ---
+
+# Parses the configuration file.
+# Note: `source` is used for simplicity. For production-grade security,
+# a key-value parser would be preferable to prevent code injection.
+parse_config() {
+    if [[ ! -f "${CONFIG_PATH}" ]]; then
+        log_error "Configuration file not found: ${CONFIG_PATH}"
+    fi
+    # shellcheck source=/dev/null
+    source "${CONFIG_PATH}"
+}
+
+# Reliably determines the full kernel version string (e.g., 6.1.0-1-arch)
+# by querying the pacman database for the target package.
+get_kernel_version() {
+    local pkg_name="$1"
+    local kernel_ver
+
+    kernel_ver=$(pacman -Ql "${pkg_name}" | grep -oP '/usr/lib/modules/\K[^/]+' | uniq)
+
+    if [[ -z "${kernel_ver}" ]]; then
+        log_error "Could not determine kernel version for package: ${pkg_name}"
+    fi
+    printf "%s" "${kernel_ver}"
+}
+
+# Retrieves the system's machine-id.
+get_machine_id() {
+    if [[ ! -f "/etc/machine-id" ]]; then
+        log_error "Could not read /etc/machine-id. Please ensure the file exists."
+    fi
+    cat "/etc/machine-id"
+}
+
+# Detects the correct microcode image to use.
+# This is more robust than hardcoding 'intel-ucode.img'.
+get_microcode_path() {
+    if [[ -f "/boot/intel-ucode.img" ]]; then
+        printf "/intel-ucode.img"
+    elif [[ -f "/boot/amd-ucode.img" ]]; then
+        printf "/amd-ucode.img"
+    else
+        # It's not an error if no microcode is found, just return empty.
+        printf ""
+    fi
+}
+
+# Builds the Booster image for the specified kernel version and places it
+# in the correct, structured directory within /boot.
+build_booster_image() {
+    local kernel_ver="$1"
+    local output_path="$2"
+
+    log_info "Building Booster image for kernel ${kernel_ver}..."
+    if ! booster build --force --kernel-version "${kernel_ver}" "${output_path}"; then
+        log_error "Booster build failed."
+    fi
+    log_info "Booster image successfully created: ${output_path}"
+}
+
+# Updates the Limine configuration file atomically.
+# This function reads the config line by line and writes a new version,
+# which is more readable and maintainable than a complex awk/sed script.
+update_limine_config() {
+    local entry_name="$1"
+    local kernel_path="$2"
+    local microcode_path="$3"
+    local booster_path="$4"
+    local cmdline="$5"
+
+    local temp_file
+    temp_file=$(mktemp)
+    local in_target_block=0
+
+    # Ensure the target entry exists before proceeding.
+    if ! grep -qF "/${entry_name}" "${LIMINE_CONFIG_PATH}"; then
+        log_error "Entry '/${entry_name}' not found in ${LIMINE_CONFIG_PATH}. Please create it manually."
+    fi
+
+    log_info "Updating ${LIMINE_CONFIG_PATH}..."
+
+    while IFS= read -r line; do
+        if [[ "${line}" == "/${entry_name}" ]]; then
+            # We've found the start of our target block.
+            in_target_block=1
+            printf "%s\n" "${line}" >> "${temp_file}"
+
+            # Write the new, updated entries.
+            printf "    kernel_path: boot():%s\n" "${kernel_path}" >> "${temp_file}"
+            if [[ -n "${microcode_path}" ]]; then
+                printf "    module_path: boot():%s\n" "${microcode_path}" >> "${temp_file}"
+            fi
+            printf "    module_path: boot():%s\n" "${booster_path}" >> "${temp_file}"
+            if [[ -n "${cmdline}" ]]; then
+                printf "    kernel_cmdline: %s\n" "${cmdline}" >> "${temp_file}"
+            fi
+        elif (( in_target_block )); then
+            # We are inside the target block. We need to discard old lines
+            # until we find the start of the next block.
+            if [[ "${line}" =~ ^/ ]]; then
+                # This is the start of a new block, so our target block has ended.
+                in_target_block=0
+                printf "%s\n" "${line}" >> "${temp_file}"
+            fi
+            # Otherwise, do nothing, effectively deleting the old line.
+        else
+            # We are not in the target block, so just copy the line.
+            printf "%s\n" "${line}" >> "${temp_file}"
+        fi
+    done < "${LIMINE_CONFIG_PATH}"
+
+    # Atomically replace the old config with the new one.
+    mv "${temp_file}" "${LIMINE_CONFIG_PATH}"
+    log_info "${LIMINE_CONFIG_PATH} successfully updated."
+}
+
+
+# --- Main Execution ---
+main() {
+    # 1. Initial checks and configuration parsing
+    if (( EUID != 0 )); then
+        log_error "This script must be run with root privileges."
+    fi
+    parse_config
+
+    # 2. Gather system information
+    local kernel_version
+    kernel_version=$(get_kernel_version "${TARGET_KERNEL_PACKAGE}")
+    log_info "Updating for kernel package ${TARGET_KERNEL_PACKAGE}, version ${kernel_version}"
+
+    local machine_id
+    machine_id=$(get_machine_id)
+    log_info "Using machine-id: ${machine_id}"
+
+    # 3. Define paths based on limine-snapper-sync logic
+    local dest_dir_rel="/${machine_id}/${TARGET_KERNEL_PACKAGE}"
+    local dest_dir_abs="/boot${dest_dir_rel}"
+    mkdir -p "${dest_dir_abs}"
+
+    local kernel_image_path="${dest_dir_rel}/vmlinuz-${TARGET_KERNEL_PACKAGE}"
+    local booster_image_path="${dest_dir_rel}/booster-${TARGET_KERNEL_PACKAGE}.img"
+    local microcode_image_path=""
+    if [[ "${ENABLE_MICROCODE:-no}" == "yes" ]]; then
+        microcode_image_path=$(get_microcode_path)
+        if [[ -n "${microcode_image_path}" ]]; then
+             log_info "Found microcode: ${microcode_image_path}"
+        fi
+    fi
+
+    # 4. Build the Booster image
+    build_booster_image "${kernel_version}" "${dest_dir_abs}/booster-${TARGET_KERNEL_PACKAGE}.img"
+
+    # 5. Update the Limine configuration
+    update_limine_config \
+        "${TARGET_ENTRY_NAME}" \
+        "${kernel_image_path}" \
+        "${microcode_image_path}" \
+        "${booster_image_path}" \
+        "${KERNEL_CMDLINE:-}"
+}
+
+# This construct ensures the main function is called only when the script is executed directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
