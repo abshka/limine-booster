@@ -1,5 +1,4 @@
-# Maintainer: Your Name <your.email@example.com>
-# Contributor: Another Person <another.email@example.com>
+# Maintainer: Alexander Belov markelofaleksei@gmail.com
 
 pkgname=limine-booster-manager
 pkgver=1.0.0
