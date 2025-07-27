@@ -1,10 +1,10 @@
-# This is an install script for the limine-booster-manager package.
+# This is an install script for the limine-booster package.
 
 # This function is executed after the package is installed.
 post_install() {
     # Use printf for better formatting control and portability.
     printf "\n"
-    printf ">>> %s has been installed.\n" "limine-booster-manager"
+    printf ">>> %s has been installed.\n" "limine-booster"
     printf ">>> Please follow these steps to complete the setup:\n"
     printf "\n"
     printf "  \033[1;34m1. Configure the package:\033[0m\n"
@@ -16,7 +16,7 @@ post_install() {
     printf "     TARGET_ENTRY_NAME from the config file. Example:\n"
     printf "\n"
     printf "     \033[0;32m/Arch Linux (Booster)\n"
-    printf "         comment: This entry is managed by limine-booster-manager\n"
+    printf "         comment: This entry is managed by limine-booster\n"
     printf "         protocol: linux\n"
     printf "         # The script will automatically populate the paths below.\033[0m\n"
     printf "\n"
