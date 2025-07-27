@@ -6,7 +6,7 @@
 
 # To match the repository name, it's good practice to use the same pkgname.
 pkgname=limine-booster
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="Automates Limine bootloader entries for kernels using Booster"
 arch=('any')
