@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # --- Global Constants ---
-readonly SCRIPT_NAME="limine-booster-manager"
+readonly SCRIPT_NAME="limine-booster"
 readonly CONFIG_PATH="/etc/default/limine-booster.conf"
 readonly LIMINE_CONFIG_PATH="/boot/limine.conf"
 

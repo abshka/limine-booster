@@ -6,10 +6,10 @@ This tool provides a pacman hook that automatically regenerates the Booster imag
 
 ## Features
 
--   Fully automated updates via pacman hooks.
--   Configurable to target any kernel package (e.g., `linux`, `linux-lts`, `linux-zen`).
--   Automatically detects and includes Intel/AMD microcode.
--   Clean, single-purpose script with no external dependencies besides `booster` and `limine`.
+- Fully automated updates via pacman hooks.
+- Configurable to target any kernel package (e.g., `linux`, `linux-lts`, `linux-zen`).
+- Automatically detects and includes Intel/AMD microcode.
+- Clean, single-purpose script with no external dependencies besides `booster` and `limine`.
 
 ## Installation
 
@@ -39,7 +39,7 @@ Add a new, dedicated entry to your `/boot/limine.conf`. The title must exactly m
 ```ini
 # /boot/limine.conf
 /Arch Linux (Booster)
-    comment: This entry is managed by limine-booster-manager
+    comment: This entry is managed by limine-booster
     protocol: linux
     # The script will automatically populate the paths below.
 ```
