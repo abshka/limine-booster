@@ -1,15 +1,16 @@
-# Limine Booster Manager
+# Limine Booster
 
-A simple, automated tool to manage Limine bootloader entries for Arch Linux kernels that use Booster instead of mkinitcpio.
+A zero-configuration, automated tool to manage Limine bootloader entries for Arch Linux kernels that use Booster.
 
-This tool provides a pacman hook that automatically regenerates the Booster image and updates a dedicated Limine entry whenever a specified kernel package is installed or upgraded.
+This tool provides a pacman hook that automatically creates and updates Limine entries for all installed kernels, using the command line from your currently running system. No manual configuration is required.
 
 ## Features
 
-- Fully automated updates via pacman hooks.
-- Configurable to target any kernel package (e.g., `linux`, `linux-lts`, `linux-zen`).
-- Automatically detects and includes Intel/AMD microcode.
-- Clean, single-purpose script with no external dependencies besides `booster` and `limine`.
+- **Zero-Configuration:** Works out of the box. No need to edit config files after installation.
+- **Fully Automated:** A pacman hook handles everything automatically when you install or upgrade any kernel.
+- **Multi-Kernel Support:** Automatically creates and manages separate entries for all installed kernels (e.g., `linux`, `linux-lts`, `linux-zen`).
+- **Smart Cmdline Detection:** Uses the command line from your running system (`/proc/cmdline`) for new entries.
+- **Automatic Microcode Detection:** Includes Intel/AMD microcode if available.
 
 ## Installation
 
@@ -19,40 +20,26 @@ Install the package from the Arch User Repository (AUR). For example, using `yay
 yay -S limine-booster
 ```
 
-## Setup
+## Usage
 
-After installation, you need to perform three simple steps:
+**1. Install the package.**
 
-**1. Configure the package:**
+**2. Install or update any kernel.**
 
-Edit `/etc/default/limine-booster.conf` to specify which kernel package you want to manage.
+That's it. The tool will automatically create a new entry in your `/boot/limine.conf` for the kernel you just installed. For example, after installing the `linux-lts` package, a new entry titled `/Arch Linux (linux-lts)` will be created.
+
+### Advanced Configuration (Optional)
+
+For most users, no configuration is needed. However, if you need to override the default behavior, you can edit `/etc/default/limine-booster.conf`.
+
+**Override Kernel Command Line:**
+
+By default, the script uses the command line from `/proc/cmdline`. You can specify a custom one:
 
 ```ini
 # /etc/default/limine-booster.conf
-TARGET_KERNEL_PACKAGE="linux-cachyos-rc"
+CMDLINE_OVERRIDE="root=UUID=... rw quiet"
 ```
-
-**2. Create a Limine boot entry:**
-
-Add a new, dedicated entry to your `/boot/limine.conf`. The title must exactly match `TARGET_ENTRY_NAME` from your config file.
-
-```ini
-# /boot/limine.conf
-/Arch Linux (Booster)
-    comment: This entry is managed by limine-booster
-    protocol: linux
-    # The script will automatically populate the paths below.
-```
-
-**3. Run the update script manually:**
-
-This will perform the initial setup, generate the first Booster image, and populate your new Limine entry.
-
-```bash
-sudo limine-booster-update
-```
-
-That's it! From now on, the process is fully automated.
 
 ## License
 
