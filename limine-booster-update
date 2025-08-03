@@ -74,7 +74,6 @@ build_booster_image() {
     log_info "Booster image successfully created: ${output_path}"
 }
 
-# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ЗДЕСЬ ---
 # Updates the Limine configuration file using a robust awk script.
 # This approach preserves all unknown lines (like 'comment' and 'protocol')
 # while replacing only the lines it's meant to manage.
@@ -135,27 +134,55 @@ update_limine_config() {
 }
 
 
+# Determines the package name that owns a given file.
+get_package_from_file() {
+    local file_path="$1"
+    local pkg_name
+    # pacman -Qo returns "error: No package owns..." or "filename is owned by pkgname version"
+    pkg_name=$(pacman -Qo "/${file_path}" | awk '{print $5}')
+    if [[ -z "${pkg_name}" ]]; then
+        log_error "Could not determine owner of file: /${file_path}"
+    fi
+    printf "%s" "${pkg_name}"
+}
+
 # --- Main Execution ---
 main() {
+    # 1. Initial checks and configuration parsing
     if (( EUID != 0 )); then
         log_error "This script must be run with root privileges."
     fi
     parse_config
 
-    local kernel_version
-    kernel_version=$(get_kernel_version "${TARGET_KERNEL_PACKAGE}")
-    log_info "Updating for kernel package ${TARGET_KERNEL_PACKAGE}, version ${kernel_version}"
+    # --- MAJOR CHANGES HERE ---
+    # 2. Read the triggering file path from stdin (passed by the hook)
+    local trigger_path
+    read -r trigger_path
+    if [[ -z "${trigger_path}" ]]; then
+        log_info "No specific target provided by hook. Nothing to do."
+        exit 0
+    fi
+
+    # 3. Determine everything from the trigger path
+    local kernel_version="${trigger_path#usr/lib/modules/}"
+    kernel_version="${kernel_version%/vmlinuz}"
+
+    local target_kernel_package
+    target_kernel_package=$(get_package_from_file "${trigger_path}")
+
+    log_info "Hook triggered by package ${target_kernel_package}, kernel version ${kernel_version}"
+    # --- END OF MAJOR CHANGES ---
 
     local machine_id
     machine_id=$(get_machine_id)
     log_info "Using machine-id: ${machine_id}"
 
-    local dest_dir_rel="/${machine_id}/${TARGET_KERNEL_PACKAGE}"
+    local dest_dir_rel="/${machine_id}/${target_kernel_package}"
     local dest_dir_abs="/boot${dest_dir_rel}"
     mkdir -p "${dest_dir_abs}"
 
-    local kernel_image_path="${dest_dir_rel}/vmlinuz-${TARGET_KERNEL_PACKAGE}"
-    local booster_image_path="${dest_dir_rel}/booster-${TARGET_KERNEL_PACKAGE}.img"
+    local kernel_image_path="${dest_dir_rel}/vmlinuz-${target_kernel_package}"
+    local booster_image_path="${dest_dir_rel}/booster-${target_kernel_package}.img"
     local microcode_image_path=""
     if [[ "${ENABLE_MICROCODE:-no}" == "yes" ]]; then
         microcode_image_path=$(get_microcode_path)
@@ -164,7 +191,7 @@ main() {
         fi
     fi
 
-    build_booster_image "${kernel_version}" "${dest_dir_abs}/booster-${TARGET_KERNEL_PACKAGE}.img"
+    build_booster_image "${kernel_version}" "${dest_dir_abs}/booster-${target_kernel_package}.img"
 
     update_limine_config \
         "${TARGET_ENTRY_NAME}" \
