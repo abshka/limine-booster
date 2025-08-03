@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# limine-booster-update
+# limine-booster-update (Optimized Version)
 #
 
 # --- Script Configuration ---
@@ -10,163 +10,295 @@ set -euo pipefail
 readonly SCRIPT_NAME="limine-booster"
 readonly CONFIG_PATH="/etc/default/limine-booster.conf"
 readonly LIMINE_CONFIG_PATH="/boot/limine.conf"
+readonly MODULES_PATH="/usr/lib/modules"
+readonly MACHINE_ID_FILE="/etc/machine-id"
+
+# --- Global Variables ---
+declare -A PACKAGE_KERNEL_MAP=()
+declare -A FILE_CACHE=()
+MACHINE_ID=""
+MICROCODE_PATH=""
+KERNEL_CMDLINE=""
 
 # --- Logging Functions ---
 log_info() { printf ">>> [%s] %s\n" "${SCRIPT_NAME}" "$1"; }
 log_error() { printf "!!! [%s] ERROR: %s\n" "${SCRIPT_NAME}" "$1" >&2; exit 1; }
 
-# --- Core Functions ---
+# --- Utility Functions ---
 
-parse_config() {
-    if [[ -f "${CONFIG_PATH}" ]]; then
-        source "${CONFIG_PATH}"
+# Initialize global variables once
+init_globals() {
+    # Cache machine ID
+    if [[ -f "${MACHINE_ID_FILE}" ]]; then
+        MACHINE_ID=$(<"${MACHINE_ID_FILE}")
+    else
+        log_error "Machine ID file not found: ${MACHINE_ID_FILE}"
+    fi
+
+    # Cache microcode path
+    if [[ "${ENABLE_MICROCODE:-no}" == "yes" ]]; then
+        if [[ -f "/boot/intel-ucode.img" ]]; then
+            MICROCODE_PATH="/intel-ucode.img"
+        elif [[ -f "/boot/amd-ucode.img" ]]; then
+            MICROCODE_PATH="/amd-ucode.img"
+        fi
+    fi
+
+    # Cache kernel command line
+    if [[ -n "${CMDLINE_OVERRIDE:-}" ]]; then
+        KERNEL_CMDLINE="${CMDLINE_OVERRIDE}"
+    elif [[ -f "/proc/cmdline" ]]; then
+        KERNEL_CMDLINE=$(<"/proc/cmdline")
+    else
+        log_error "Cannot determine kernel command line. Please set CMDLINE_OVERRIDE in config."
     fi
 }
 
-get_package_from_file() {
+# Parse configuration file
+parse_config() {
+    [[ -f "${CONFIG_PATH}" ]] && source "${CONFIG_PATH}"
+}
+
+# Get package owner of a file (with caching)
+get_package_owner() {
     local file_path="$1"
+    local cache_key="owner_${file_path}"
+
+    if [[ -n "${FILE_CACHE[${cache_key}]:-}" ]]; then
+        printf "%s" "${FILE_CACHE[${cache_key}]}"
+        return
+    fi
+
     local pkg_name
     pkg_name=$(pacman -Qo "/${file_path}" 2>/dev/null | awk '{print $5}')
     if [[ -z "${pkg_name}" ]]; then
         log_error "Could not determine owner of file: /${file_path}"
     fi
+
+    FILE_CACHE[${cache_key}]="${pkg_name}"
     printf "%s" "${pkg_name}"
 }
 
-get_machine_id() { cat "/etc/machine-id"; }
+# Build package to kernel version mapping (optimized)
+build_package_kernel_map() {
+    log_info "Building kernel package mapping..."
 
-get_microcode_path() {
-    if [[ -f "/boot/intel-ucode.img" ]]; then printf "/intel-ucode.img";
-    elif [[ -f "/boot/amd-ucode.img" ]]; then printf "/amd-ucode.img";
-    else printf ""; fi
+    # Use a single find command and process results efficiently
+    while IFS= read -r -d '' vmlinuz_path; do
+        local pkg_name kernel_version
+        pkg_name=$(pacman -Qo "${vmlinuz_path}" 2>/dev/null | awk '{print $5}')
+        if [[ -n "${pkg_name}" ]]; then
+            kernel_version=$(basename "$(dirname "${vmlinuz_path}")")
+            PACKAGE_KERNEL_MAP["${pkg_name}"]="${kernel_version}"
+        fi
+    done < <(find "${MODULES_PATH}" -name "vmlinuz" -type f -print0 2>/dev/null)
 }
 
+# Build Booster image with improved error handling
 build_booster_image() {
     local kernel_ver="$1"
     local output_path="$2"
+
     log_info "Building Booster image for kernel ${kernel_ver}..."
-    if ! booster build --force --kernel-version "${kernel_ver}" "${output_path}"; then
-        log_error "Booster build failed."
+
+    # Check if image already exists and is newer than 1 hour
+    if [[ -f "${output_path}" ]] && [[ $(find "${output_path}" -mmin -60 2>/dev/null) ]]; then
+        log_info "Booster image is recent, skipping rebuild: ${output_path}"
+        return 0
     fi
+
+    if ! timeout 60 booster build --force --kernel-version "${kernel_ver}" "${output_path}"; then
+        log_error "Booster build failed or timed out for kernel ${kernel_ver}"
+    fi
+
     log_info "Booster image successfully created: ${output_path}"
 }
 
-# This function checks if an entry exists. If yes, it updates it.
-# If no, it creates a new, fully-formed entry at the end of the file.
-update_or_create_limine_entry() {
+# Optimized Limine entry management
+update_limine_entry() {
     local entry_name="$1"
     local kernel_path="$2"
-    local microcode_path="$3"
-    local booster_path="$4"
-    local cmdline="$5"
+    local booster_path="$3"
 
-    # Use a temporary file for atomic operations
     local temp_file
-    temp_file=$(mktemp)
-    trap 'rm -f -- "$temp_file"' EXIT
+    temp_file=$(mktemp) || log_error "Failed to create temporary file"
 
-    # Check if the entry already exists
-    if grep -qF "/${entry_name}" "${LIMINE_CONFIG_PATH}"; then
-        log_info "Entry '/${entry_name}' found. Updating in-place."
-        # Use awk to update the existing entry, preserving comments/protocol
-        awk \
-            -v entry_name="/${entry_name}" \
-            -v kernel_path_new="    kernel_path: boot():${kernel_path}" \
-            -v booster_path_new="    module_path: boot():${booster_path}" \
-            -v microcode_path_new="    module_path: boot():${microcode_path}" \
-            -v cmdline_new="    kernel_cmdline: ${cmdline}" \
-            -v enable_microcode="${ENABLE_MICROCODE:-no}" \
-        '
-        /^\// { in_block = 0 }
-        $0 == entry_name { in_block = 1 }
-        in_block && /^[[:space:]]*(kernel_path:|module_path:|kernel_cmdline:)/ { next }
-        { print }
-        in_block && $0 == entry_name {
-            print kernel_path_new
-            if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
-                print microcode_path_new
-            }
-            print booster_path_new
-            if (cmdline_new != "    kernel_cmdline: ") {
-                print cmdline_new
-            }
-        }
-        ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
+    local entry_exists=false
+    if grep -qF "/${entry_name}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
+        entry_exists=true
+        log_info "Updating existing entry: /${entry_name}"
     else
-        log_info "Entry '/${entry_name}' not found. Creating new entry."
-        # Copy the existing config and append the new entry
-        cat "${LIMINE_CONFIG_PATH}" > "${temp_file}"
-        printf "\n# Entry automatically created by %s\n" "${SCRIPT_NAME}" >> "${temp_file}"
-        printf "/%s\n" "${entry_name}" >> "${temp_file}"
-        printf "    protocol: linux\n" >> "${temp_file}"
-        printf "    comment: Auto-generated for %s\n" "${entry_name#* (}" >> "${temp_file}"
-        printf "    kernel_path: boot():%s\n" "${kernel_path}" >> "${temp_file}"
-        if [[ "${ENABLE_MICROCODE:-no}" == "yes" && -n "${microcode_path}" ]]; then
-            printf "    module_path: boot():%s\n" "${microcode_path}" >> "${temp_file}"
-        fi
-        printf "    module_path: boot():%s\n" "${booster_path}" >> "${temp_file}"
-        if [[ -n "${cmdline}" ]]; then
-            printf "    kernel_cmdline: %s\n" "${cmdline}" >> "${temp_file}"
-        fi
+        log_info "Creating new entry: /${entry_name}"
     fi
 
-    # Atomically replace the old config with the new one
-    mv "${temp_file}" "${LIMINE_CONFIG_PATH}"
-    log_info "${LIMINE_CONFIG_PATH} successfully updated."
+    if ${entry_exists}; then
+        # Update existing entry using optimized awk
+        awk -v entry_name="/${entry_name}" \
+            -v kernel_path_new="    kernel_path: boot():${kernel_path}" \
+            -v booster_path_new="    module_path: boot():${booster_path}" \
+            -v microcode_path_new="    module_path: boot():${MICROCODE_PATH}" \
+            -v cmdline_new="    kernel_cmdline: ${KERNEL_CMDLINE}" \
+            -v enable_microcode="${ENABLE_MICROCODE:-no}" \
+            '
+            /^\// { in_block = 0 }
+            $0 == entry_name { in_block = 1 }
+            in_block && /^[[:space:]]*(kernel_path:|module_path:|kernel_cmdline:)/ { next }
+            { print }
+            in_block && $0 == entry_name {
+                print kernel_path_new
+                if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
+                    print microcode_path_new
+                }
+                print booster_path_new
+                if (cmdline_new != "    kernel_cmdline: ") {
+                    print cmdline_new
+                }
+            }
+            ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
+    else
+        # Create new entry
+        {
+            cat "${LIMINE_CONFIG_PATH}"
+            printf "\n# Entry automatically created by %s\n" "${SCRIPT_NAME}"
+            printf "/%s\n" "${entry_name}"
+            printf "    protocol: linux\n"
+            printf "    comment: Auto-generated for %s\n" "${entry_name#* (}"
+            printf "    kernel_path: boot():%s\n" "${kernel_path}"
+            [[ -n "${MICROCODE_PATH}" ]] && printf "    module_path: boot():%s\n" "${MICROCODE_PATH}"
+            printf "    module_path: boot():%s\n" "${booster_path}"
+            [[ -n "${KERNEL_CMDLINE}" ]] && printf "    kernel_cmdline: %s\n" "${KERNEL_CMDLINE}"
+        } > "${temp_file}"
+    fi
+
+    # Atomic replacement
+    if mv "${temp_file}" "${LIMINE_CONFIG_PATH}"; then
+        log_info "Limine configuration updated successfully"
+    else
+        rm -f "${temp_file}" 2>/dev/null || true
+        log_error "Failed to update Limine configuration"
+    fi
+}
+
+# Optimized kernel package processing
+process_kernel_package() {
+    local pkg_name="$1"
+
+    log_info "Processing kernel package: ${pkg_name}"
+
+    # Quick package existence check
+    if ! pacman -Q "${pkg_name}" &>/dev/null; then
+        log_error "Package ${pkg_name} is not installed"
+    fi
+
+    # Get kernel version from pre-built mapping
+    local kernel_version="${PACKAGE_KERNEL_MAP[${pkg_name}]:-}"
+    if [[ -z "${kernel_version}" ]]; then
+        log_info "Could not determine kernel version for ${pkg_name}. Skipping."
+        return 0
+    fi
+
+    # Setup paths
+    local dest_dir_rel="/${MACHINE_ID}/${pkg_name}"
+    local dest_dir_abs="/boot${dest_dir_rel}"
+    local kernel_source="/boot/vmlinuz-${pkg_name}"
+    local kernel_dest="${dest_dir_abs}/vmlinuz-${pkg_name}"
+    local booster_dest="${dest_dir_abs}/booster-${pkg_name}.img"
+
+    # Create destination directory
+    mkdir -p "${dest_dir_abs}" || log_error "Failed to create directory: ${dest_dir_abs}"
+
+    # Copy kernel image if source exists and destination is older
+    if [[ -f "${kernel_source}" ]]; then
+        if [[ ! -f "${kernel_dest}" ]] || [[ "${kernel_source}" -nt "${kernel_dest}" ]]; then
+            cp "${kernel_source}" "${kernel_dest}" || \
+                log_error "Failed to copy kernel image from ${kernel_source} to ${kernel_dest}"
+        fi
+    else
+        log_error "Kernel image not found: ${kernel_source}"
+    fi
+
+    # Build Booster image
+    build_booster_image "${kernel_version}" "${booster_dest}"
+
+    # Update Limine configuration
+    local entry_title="Arch Linux (${pkg_name})"
+    local kernel_image_path="${dest_dir_rel}/vmlinuz-${pkg_name}"
+    local booster_image_path="${dest_dir_rel}/booster-${pkg_name}.img"
+
+    update_limine_entry "${entry_title}" "${kernel_image_path}" "${booster_image_path}"
+}
+
+# Optimized hook mode processing
+process_hook_targets() {
+    local targets=("$@")
+
+    for target in "${targets[@]}"; do
+        log_info "Hook triggered for target: ${target}"
+
+        # Quick pattern check for kernel files
+        if [[ ! "${target}" =~ usr/lib/modules/.*/vmlinuz ]]; then
+            log_info "Target ${target} is not a kernel, skipping"
+            continue
+        fi
+
+        local pkg_name kernel_ver
+        pkg_name=$(get_package_owner "${target}")
+        kernel_ver=$(basename "$(dirname "${target}")")
+
+        log_info "Hook triggered for package ${pkg_name}, kernel version ${kernel_ver}"
+        process_kernel_package "${pkg_name}"
+    done
+}
+
+# Optimized manual sync mode
+process_manual_sync() {
+    log_info "Running in manual sync mode. Checking all installed kernels..."
+
+    if [[ ${#PACKAGE_KERNEL_MAP[@]} -eq 0 ]]; then
+        log_info "No kernel packages found. Nothing to do."
+        return 0
+    fi
+
+    # Get unique package names and sort them
+    local packages=($(printf '%s\n' "${!PACKAGE_KERNEL_MAP[@]}" | sort))
+
+    log_info "Found kernel packages: ${packages[*]}"
+
+    for pkg in "${packages[@]}"; do
+        process_kernel_package "${pkg}"
+    done
+
+    log_info "All kernels synced."
 }
 
 # --- Main Execution ---
 main() {
-    if (( EUID != 0 )); then log_error "This script must be run with root privileges."; fi
+    # Root privileges check
+    (( EUID == 0 )) || log_error "This script must be run with root privileges."
+
+    # Initialize configuration and globals
     parse_config
+    init_globals
+    build_package_kernel_map
 
-    local trigger_path
-    read -r trigger_path
-    if [[ -z "${trigger_path}" ]]; then log_info "No specific target provided by hook. Nothing to do."; exit 0; fi
-
-    local kernel_version="${trigger_path#usr/lib/modules/}"
-    kernel_version="${kernel_version%/vmlinuz}"
-
-    local pkg_name
-    pkg_name=$(get_package_from_file "${trigger_path}")
-    log_info "Hook triggered for package ${pkg_name}, kernel version ${kernel_version}"
-
-    local entry_title="Arch Linux (${pkg_name})"
-    local kernel_cmdline
-    if [[ -n "${CMDLINE_OVERRIDE:-}" ]]; then
-        kernel_cmdline="${CMDLINE_OVERRIDE}"
-        log_info "Using command line from override in config file."
-    elif [[ -f "/proc/cmdline" ]]; then
-        kernel_cmdline=$(cat /proc/cmdline)
-        log_info "Using command line from running system (/proc/cmdline)."
+    # Determine execution mode and process accordingly
+    if [[ $# -gt 0 ]]; then
+        # Hook mode via command line arguments
+        log_info "Running in hook mode (command line)..."
+        process_hook_targets "$@"
+    elif [[ -n "${TARGETS:-}" ]]; then
+        # Hook mode via environment variable
+        log_info "Running in hook mode (environment)..."
+        # Convert space-separated string to array
+        read -ra targets_array <<< "${TARGETS}"
+        process_hook_targets "${targets_array[@]}"
     else
-        log_error "Cannot determine kernel command line. Please set CMDLINE_OVERRIDE in config."
+        # Manual sync mode
+        process_manual_sync
     fi
-
-    local machine_id
-    machine_id=$(get_machine_id)
-
-    local dest_dir_rel="/${machine_id}/${pkg_name}"
-    local dest_dir_abs="/boot${dest_dir_rel}"
-    mkdir -p "${dest_dir_abs}"
-
-    local kernel_image_path="${dest_dir_rel}/vmlinuz-${pkg_name}"
-    local booster_image_path="${dest_dir_rel}/booster-${pkg_name}.img"
-    local microcode_image_path=""
-    if [[ "${ENABLE_MICROCODE:-no}" == "yes" ]]; then
-        microcode_image_path=$(get_microcode_path)
-    fi
-
-    build_booster_image "${kernel_version}" "${dest_dir_abs}/booster-${pkg_name}.img"
-
-    update_or_create_limine_entry \
-        "${entry_title}" \
-        "${kernel_image_path}" \
-        "${microcode_image_path}" \
-        "${booster_image_path}" \
-        "${kernel_cmdline}"
 }
 
+# Execute main function if script is run directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi

@@ -8,7 +8,6 @@ Target = usr/lib/modules/*/vmlinuz
 [Action]
 Description = Updating Limine entry with Booster for a new kernel...
 When = PostTransaction
-# This is the crucial addition. It pipes the list of triggering targets
-# (e.g., "usr/lib/modules/6.16.0-5-cachyos/vmlinuz") to the script's stdin.
+# Pass targets as command line arguments to the script
 NeedsTargets
 Exec = /usr/bin/limine-booster-update
