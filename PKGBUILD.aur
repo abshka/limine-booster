@@ -1,7 +1,7 @@
 # Maintainer: Alexander Belov markelofaleksei@gmail.com
 
 pkgname=limine-booster
-pkgver=1.0.1
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Automates Limine bootloader entries for kernels using Booster"
 arch=('any')
