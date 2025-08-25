@@ -1,0 +1,23 @@
+#!/bin/bash
+#
+# limine-booster-remove
+# Wrapper script for removing kernel entries
+#
+
+set -euo pipefail
+
+# Check if package name is provided
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <kernel-package-name>" >&2
+    echo "Example: $0 linux-lts" >&2
+    exit 1
+fi
+
+# Check root privileges
+if (( EUID != 0 )); then
+    echo "ERROR: This script must be run with root privileges." >&2
+    exit 1
+fi
+
+# Call main script with removal flag
+exec /usr/bin/limine-booster-update --remove "$1"
