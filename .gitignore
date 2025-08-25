@@ -1,3 +1,8 @@
 *.pkg.tar.zst
+*.tar.gz
 pkg/
 src/
+PKGBUILD.local
+test-*.conf
+temp_*
+*.backup
