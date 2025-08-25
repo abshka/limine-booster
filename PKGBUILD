@@ -1,6 +1,6 @@
 # Maintainer: Alexander Belov <markelofaleksei@gmail.com>
 pkgname=limine-booster
-pkgver=2.2.0
+pkgver=2.2.1
 pkgrel=1
 pkgdesc="Zero-config automation for Limine boot entries with Booster"
 arch=('any')
