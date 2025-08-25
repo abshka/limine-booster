@@ -1,6 +1,6 @@
 # Maintainer: Alexander Belov <markelofaleksei@gmail.com>
 pkgname=limine-booster
-pkgver=2.1.0
+pkgver=2.2.0
 pkgrel=1
 pkgdesc="Zero-config automation for Limine boot entries with Booster"
 arch=('any')
@@ -14,7 +14,19 @@ sha256sums=('SKIP')
 
 package() {
     cd "$pkgname-$pkgver"
+
+    # Install the main script
     install -Dm755 "limine-booster-update" "$pkgdir/usr/bin/limine-booster-update"
+
+    # Install the remove script
+    install -Dm755 "limine-booster-remove" "$pkgdir/usr/bin/limine-booster-remove"
+
+    # Install the install script
+    install -Dm755 "limine-booster-install.sh" "$pkgdir/usr/share/libalpm/scripts/limine-booster-install.sh"
+
+    # Install the default configuration file
     install -Dm644 "limine-booster.conf" "$pkgdir/etc/default/limine-booster.conf"
+
+    # Install the pacman hook
     install -Dm644 "91-limine-booster.hook" "$pkgdir/usr/share/libalpm/hooks/91-limine-booster.hook"
 }
