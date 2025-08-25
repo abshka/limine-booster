@@ -145,11 +145,6 @@ update_limine_entry() {
             in_block && /^[[:space:]]*(kernel_path:|module_path:|kernel_cmdline:)/ { next }
             { print }
             in_block && $0 == entry_name {
-                print "    protocol: linux"
-                # Extract clean comment (remove "Arch Linux (" and ")")
-                pkg_name = substr(entry_name, 14)  # Remove "/Arch Linux ("
-                sub(/\)$/, "", pkg_name)           # Remove trailing ")"
-                print "    comment: Auto-generated for " pkg_name
                 # Correct order: kernel first, then microcode, then initramfs
                 print kernel_path_new
                 if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
@@ -163,7 +158,6 @@ update_limine_entry() {
             ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
     else
         # Create new entry at the top of the file
-        local temp_config=$(mktemp)
         local found_first_entry=false
 
         while IFS= read -r line || [[ -n "$line" ]]; do
@@ -171,7 +165,6 @@ update_limine_entry() {
             if [[ "${line}" =~ ^/[^/] ]] && ! ${found_first_entry}; then
                 found_first_entry=true
                 # Insert our new entry before the first existing entry
-                printf "\n# Entry automatically created by %s\n" "${SCRIPT_NAME}"
                 printf "/%s\n" "${entry_name}"
                 printf "    protocol: linux\n"
 
@@ -200,7 +193,6 @@ update_limine_entry() {
         if ! ${found_first_entry}; then
             {
                 cat "${temp_file}"
-                printf "\n# Entry automatically created by %s\n" "${SCRIPT_NAME}"
                 printf "/%s\n" "${entry_name}"
                 printf "    protocol: linux\n"
 
@@ -222,8 +214,6 @@ update_limine_entry() {
             } > "${temp_file}.new"
             mv "${temp_file}.new" "${temp_file}"
         fi
-
-        rm -f "${temp_config}" 2>/dev/null || true
     fi
 
     # Atomic replacement
