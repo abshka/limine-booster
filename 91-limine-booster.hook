@@ -1,13 +1,29 @@
 [Trigger]
-# This hook triggers when any package providing 'linux' is installed or upgraded.
+Type = Path
 Operation = Install
 Operation = Upgrade
+Operation = Remove
+Target = usr/lib/initcpio/*
+Target = usr/lib/firmware/*
+Target = usr/lib/modules/*/extramodules/
+Target = usr/src/*/dkms.conf
+
+[Trigger]
 Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
 Target = usr/lib/modules/*/vmlinuz
 
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = booster
+Target = booster-git
+
 [Action]
-Description = Updating Limine entry with Booster for a new kernel...
+Description = Updating Limine entries with Booster initramfs...
 When = PostTransaction
-# Pass targets as command line arguments to the script
+Exec = /usr/share/libalpm/scripts/limine-booster-install.sh
 NeedsTargets
-Exec = /usr/bin/limine-booster-update
