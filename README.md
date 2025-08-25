@@ -7,10 +7,13 @@ This tool provides a pacman hook that automatically creates and updates Limine e
 ## Features
 
 - **Zero-Configuration:** Works out of the box. No need to edit config files after installation.
-- **Fully Automated:** A pacman hook handles everything automatically when you install or upgrade any kernel.
+- **Fully Automated:** A pacman hook handles everything automatically when you install, upgrade, or remove any kernel.
 - **Multi-Kernel Support:** Automatically creates and manages separate entries for all installed kernels (e.g., `linux`, `linux-lts`, `linux-zen`).
+- **Smart Hook Logic:** Intelligently processes only changed kernels or all kernels based on the type of update.
+- **Automatic Cleanup:** Removes entries when kernel packages are uninstalled.
 - **Smart Cmdline Detection:** Uses the command line from your running system (`/proc/cmdline`) for new entries.
-- **Automatic Microcode Detection:** Includes Intel/AMD microcode if available.
+- **Automatic Microcode Detection:** Includes Intel/AMD microcode with proper ordering for optimal boot performance.
+- **Optimized Entry Positioning:** Places new kernel entries at the top of boot menu for better visibility and compatibility.
 
 ## Installation
 
