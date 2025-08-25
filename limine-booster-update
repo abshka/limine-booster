@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# limine-booster-update (Optimized Version)
+# limine-booster-update
 #
 
 # --- Script Configuration ---
@@ -59,7 +59,7 @@ parse_config() {
     [[ -f "${CONFIG_PATH}" ]] && source "${CONFIG_PATH}"
 }
 
-# Get package owner of a file (with caching)
+# Get package owner of a file
 get_package_owner() {
     local file_path="$1"
     local cache_key="owner_${file_path}"
@@ -79,11 +79,11 @@ get_package_owner() {
     printf "%s" "${pkg_name}"
 }
 
-# Build package to kernel version mapping (optimized)
+# Build package to kernel version mapping
 build_package_kernel_map() {
     log_info "Building kernel package mapping..."
 
-    # Use a single find command and process results efficiently
+    # Use a single find command and process results
     while IFS= read -r -d '' vmlinuz_path; do
         local pkg_name kernel_version
         pkg_name=$(pacman -Qo "${vmlinuz_path}" 2>/dev/null | awk '{print $5}')
@@ -94,7 +94,7 @@ build_package_kernel_map() {
     done < <(find "${MODULES_PATH}" -name "vmlinuz" -type f -print0 2>/dev/null)
 }
 
-# Build Booster image with improved error handling
+# Build Booster image
 build_booster_image() {
     local kernel_ver="$1"
     local output_path="$2"
@@ -114,7 +114,7 @@ build_booster_image() {
     log_info "Booster image successfully created: ${output_path}"
 }
 
-# Optimized Limine entry management
+# Limine entry management
 update_limine_entry() {
     local entry_name="$1"
     local kernel_path="$2"
@@ -132,7 +132,7 @@ update_limine_entry() {
     fi
 
     if ${entry_exists}; then
-        # Update existing entry using optimized awk
+        # Update existing entry
         awk -v entry_name="/${entry_name}" \
             -v kernel_path_new="    kernel_path: boot():${kernel_path}" \
             -v booster_path_new="    module_path: boot():${booster_path}" \
@@ -145,6 +145,12 @@ update_limine_entry() {
             in_block && /^[[:space:]]*(kernel_path:|module_path:|kernel_cmdline:)/ { next }
             { print }
             in_block && $0 == entry_name {
+                print "    protocol: linux"
+                # Extract clean comment (remove "Arch Linux (" and ")")
+                pkg_name = substr(entry_name, 14)  # Remove "/Arch Linux ("
+                sub(/\)$/, "", pkg_name)           # Remove trailing ")"
+                print "    comment: Auto-generated for " pkg_name
+                # Correct order: kernel first, then microcode, then initramfs
                 print kernel_path_new
                 if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
                     print microcode_path_new
@@ -156,18 +162,68 @@ update_limine_entry() {
             }
             ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
     else
-        # Create new entry
-        {
-            cat "${LIMINE_CONFIG_PATH}"
-            printf "\n# Entry automatically created by %s\n" "${SCRIPT_NAME}"
-            printf "/%s\n" "${entry_name}"
-            printf "    protocol: linux\n"
-            printf "    comment: Auto-generated for %s\n" "${entry_name#* (}"
-            printf "    kernel_path: boot():%s\n" "${kernel_path}"
-            [[ -n "${MICROCODE_PATH}" ]] && printf "    module_path: boot():%s\n" "${MICROCODE_PATH}"
-            printf "    module_path: boot():%s\n" "${booster_path}"
-            [[ -n "${KERNEL_CMDLINE}" ]] && printf "    kernel_cmdline: %s\n" "${KERNEL_CMDLINE}"
-        } > "${temp_file}"
+        # Create new entry at the top of the file
+        local temp_config=$(mktemp)
+        local found_first_entry=false
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Check if this is the first boot entry
+            if [[ "${line}" =~ ^/[^/] ]] && ! ${found_first_entry}; then
+                found_first_entry=true
+                # Insert our new entry before the first existing entry
+                printf "\n# Entry automatically created by %s\n" "${SCRIPT_NAME}"
+                printf "/%s\n" "${entry_name}"
+                printf "    protocol: linux\n"
+
+                # Extract package name for comment (remove "Arch Linux (" and ")")
+                local clean_comment="${entry_name#Arch Linux (}"
+                clean_comment="${clean_comment%)}"
+                printf "    comment: Auto-generated for %s\n" "${clean_comment}"
+
+                printf "    kernel_path: boot():%s\n" "${kernel_path}"
+
+                if [[ -n "${MICROCODE_PATH}" ]]; then
+                    printf "    module_path: boot():%s\n" "${MICROCODE_PATH}"
+                fi
+
+                printf "    module_path: boot():%s\n" "${booster_path}"
+
+                if [[ -n "${KERNEL_CMDLINE}" ]]; then
+                    printf "    kernel_cmdline: %s\n" "${KERNEL_CMDLINE}"
+                fi
+                printf "\n"
+            fi
+            printf "%s\n" "${line}"
+        done < "${LIMINE_CONFIG_PATH}" > "${temp_file}"
+
+        # If no existing entries found, append at the end
+        if ! ${found_first_entry}; then
+            {
+                cat "${temp_file}"
+                printf "\n# Entry automatically created by %s\n" "${SCRIPT_NAME}"
+                printf "/%s\n" "${entry_name}"
+                printf "    protocol: linux\n"
+
+                local clean_comment="${entry_name#Arch Linux (}"
+                clean_comment="${clean_comment%)}"
+                printf "    comment: Auto-generated for %s\n" "${clean_comment}"
+
+                printf "    kernel_path: boot():%s\n" "${kernel_path}"
+
+                if [[ -n "${MICROCODE_PATH}" ]]; then
+                    printf "    module_path: boot():%s\n" "${MICROCODE_PATH}"
+                fi
+
+                printf "    module_path: boot():%s\n" "${booster_path}"
+
+                if [[ -n "${KERNEL_CMDLINE}" ]]; then
+                    printf "    kernel_cmdline: %s\n" "${KERNEL_CMDLINE}"
+                fi
+            } > "${temp_file}.new"
+            mv "${temp_file}.new" "${temp_file}"
+        fi
+
+        rm -f "${temp_config}" 2>/dev/null || true
     fi
 
     # Atomic replacement
@@ -179,13 +235,13 @@ update_limine_entry() {
     fi
 }
 
-# Optimized kernel package processing
+# Kkernel package processing
 process_kernel_package() {
     local pkg_name="$1"
 
     log_info "Processing kernel package: ${pkg_name}"
 
-    # Quick package existence check
+    # Package existence check
     if ! pacman -Q "${pkg_name}" &>/dev/null; then
         log_error "Package ${pkg_name} is not installed"
     fi
@@ -228,14 +284,14 @@ process_kernel_package() {
     update_limine_entry "${entry_title}" "${kernel_image_path}" "${booster_image_path}"
 }
 
-# Optimized hook mode processing
+# Hook mode processing
 process_hook_targets() {
     local targets=("$@")
 
     for target in "${targets[@]}"; do
         log_info "Hook triggered for target: ${target}"
 
-        # Quick pattern check for kernel files
+        # Pattern check for kernel files
         if [[ ! "${target}" =~ usr/lib/modules/.*/vmlinuz ]]; then
             log_info "Target ${target} is not a kernel, skipping"
             continue
@@ -250,7 +306,7 @@ process_hook_targets() {
     done
 }
 
-# Optimized manual sync mode
+# Manual sync mode
 process_manual_sync() {
     log_info "Running in manual sync mode. Checking all installed kernels..."
 
@@ -271,6 +327,82 @@ process_manual_sync() {
     log_info "All kernels synced."
 }
 
+# Kernel package removal
+remove_kernel_entry() {
+    local pkg_name="$1"
+
+    log_info "Removing entry for kernel package: ${pkg_name}"
+
+    local entry_name="Arch Linux (${pkg_name})"
+    local temp_file
+    temp_file=$(mktemp) || log_error "Failed to create temporary file"
+
+    # Check if the entry exists
+    if ! grep -qF "/${entry_name}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
+        log_info "Entry '/${entry_name}' not found. Nothing to remove."
+        rm -f "${temp_file}" 2>/dev/null || true
+        return 0
+    fi
+
+    log_info "Removing entry: /${entry_name}"
+
+    # Remove the entry and its content
+    awk -v entry_name="/${entry_name}" '
+        BEGIN { in_entry = 0; skip = 0 }
+        $0 == entry_name {
+            in_entry = 1
+            skip = 1
+            # Skip the comment line before entry if it exists
+            if (prev_line ~ /^# Entry automatically created by/) {
+                lines[NR-1] = ""
+            }
+            next
+        }
+        in_entry && /^\/[^\/]/ {
+            in_entry = 0
+            skip = 0
+        }
+        in_entry && /^[[:space:]]*$/ && seen_content {
+            in_entry = 0
+            skip = 0
+            next
+        }
+        in_entry && NF > 0 {
+            seen_content = 1
+            skip = 1
+        }
+        !skip {
+            lines[NR] = $0
+        }
+        { prev_line = $0 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (i in lines && lines[i] != "") {
+                    print lines[i]
+                }
+            }
+        }
+    ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
+
+    # Atomic replacement
+    if mv "${temp_file}" "${LIMINE_CONFIG_PATH}"; then
+        log_info "Entry removed from Limine configuration"
+
+        # Clean up associated files if they exist
+        local machine_id="${MACHINE_ID}"
+        local kernel_dir="/boot/${machine_id}/${pkg_name}"
+        if [[ -d "${kernel_dir}" ]]; then
+            log_info "Cleaning up kernel files: ${kernel_dir}"
+            rm -rf "${kernel_dir}" 2>/dev/null || true
+        fi
+
+        log_info "Successfully removed kernel package: ${pkg_name}"
+    else
+        rm -f "${temp_file}" 2>/dev/null || true
+        log_error "Failed to update Limine configuration"
+    fi
+}
+
 # --- Main Execution ---
 main() {
     # Root privileges check
@@ -279,6 +411,13 @@ main() {
     # Initialize configuration and globals
     parse_config
     init_globals
+
+    # Check for removal mode
+    if [[ "${1:-}" == "--remove" ]] && [[ -n "${2:-}" ]]; then
+        remove_kernel_entry "$2"
+        return 0
+    fi
+
     build_package_kernel_map
 
     # Determine execution mode and process accordingly
