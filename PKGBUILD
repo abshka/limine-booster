@@ -1,16 +1,22 @@
-# Maintainer: Alexander Belov <markelofaleksei@gmail.com>
+# Maintainer: Alexander Belov markelofaleksei@gmail.com
 pkgname=limine-booster
-pkgver=2.2.1
+pkgver=2.4.0
 pkgrel=1
 pkgdesc="Zero-config automation for Limine boot entries with Booster"
 arch=('any')
 url="https://github.com/abshka/limine-booster"
 license=('GPL3')
 depends=('booster' 'limine')
-optdepends=('intel-ucode: For automatic detection of Intel microcode'
-            'amd-ucode: For automatic detection of AMD microcode')
+optdepends=('intel-ucode: For automatic detection and inclusion of Intel microcode'
+            'amd-ucode: For automatic detection and inclusion of AMD microcode'
+            'mkinitcpio: For generating traditional initramfs images')
 source=("$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    chmod +x limine-booster-update
+}
 
 package() {
     cd "$pkgname-$pkgver"
@@ -30,3 +36,5 @@ package() {
     # Install the pacman hook
     install -Dm644 "91-limine-booster.hook" "$pkgdir/usr/share/libalpm/hooks/91-limine-booster.hook"
 }
+
+# vim: set ts=4 sw=4 et:
