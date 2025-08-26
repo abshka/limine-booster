@@ -1,8 +1,10 @@
 # Limine Booster
 
-A zero-configuration, automated tool to manage Limine bootloader entries for Arch Linux kernels that use Booster.
+A zero-configuration, automated tool to manage Limine bootloader entries for Arch Linux kernels with support for both Booster and mkinitcpio initramfs.
 
 This tool provides a pacman hook that automatically creates and updates Limine entries for all installed kernels, using the command line from your currently running system. No manual configuration is required.
+
+The generated entries are fully compatible with `limine-snapper-sync` for BTRFS snapshot management, including automatic OS detection via machine-id.
 
 ## Features
 
@@ -29,7 +31,45 @@ yay -S limine-booster
 
 **2. Install or update any kernel.**
 
-That's it. The tool will automatically create a new entry in your `/boot/limine.conf` for the kernel you just installed. For example, after installing the `linux-lts` package, a new entry titled `/Arch Linux (linux-lts)` will be created.
+That's it. The tool will automatically create entries in your `/boot/limine.conf` for the kernel you just installed.
+
+## Entry Format
+
+The tool creates entries compatible with `limine-snapper-sync`:
+
+- A main entry: `/+Arch Linux` with machine-id comment for automatic OS detection
+- Sub-entries for each kernel: `//kernel-name kernel-version (initramfs-type)`
+
+For example, after installing the `linux-lts` package with both Booster and mkinitcpio available, you'll see:
+
+```
+/+Arch Linux
+    comment: machine-id=your-machine-id
+
+//linux-lts 6.6.52-1-lts (Booster)
+    protocol: linux
+    comment: Auto-generated for linux-lts 6.6.52-1-lts (Booster)
+    kernel_path: boot():/machine-id/linux-lts/vmlinuz-linux-lts
+    module_path: boot():/intel-ucode.img
+    module_path: boot():/machine-id/linux-lts/booster-linux-lts.img
+    kernel_cmdline: your-kernel-parameters
+
+//linux-lts 6.6.52-1-lts (mkinitcpio)
+    protocol: linux
+    comment: Auto-generated for linux-lts 6.6.52-1-lts (mkinitcpio)
+    kernel_path: boot():/machine-id/linux-lts/vmlinuz-linux-lts
+    module_path: boot():/intel-ucode.img
+    module_path: boot():/machine-id/linux-lts/initramfs-linux-lts.img
+    kernel_cmdline: your-kernel-parameters
+```
+
+### limine-snapper-sync Compatibility
+
+The generated format is fully compatible with `limine-snapper-sync`:
+
+- **Machine-ID Detection**: The main entry includes `comment: machine-id=<machine-id>` which allows `limine-snapper-sync` to automatically target the correct OS entry regardless of the OS name configuration.
+- **Proper Module Order**: Microcode is placed after the kernel and before the initramfs for optimal boot performance.
+- **Snapshot Integration**: The `/+` prefix enables automatic BTRFS snapshot functionality.
 
 ### Advanced Configuration (Optional)
 
@@ -42,6 +82,36 @@ By default, the script uses the command line from `/proc/cmdline`. You can speci
 ```ini
 # /etc/default/limine-booster.conf
 CMDLINE_OVERRIDE="root=UUID=... rw quiet"
+```
+
+**Control Initramfs Types:**
+
+You can control which initramfs types to generate entries for:
+
+```ini
+# Generate entries for both booster and mkinitcpio (default)
+INITRAMFS_TYPES="auto"
+
+# Only generate Booster entries
+INITRAMFS_TYPES="booster"
+
+# Only generate mkinitcpio entries
+INITRAMFS_TYPES="mkinitcpio"
+
+# Force both types (even if one is missing)
+INITRAMFS_TYPES="both"
+```
+
+**Entry Naming:**
+
+Control whether initramfs type is appended to entry names:
+
+```ini
+# Append type when multiple initramfs available (default)
+APPEND_INITRAMFS_TYPE="yes"
+
+# Use simple names (may cause conflicts)
+APPEND_INITRAMFS_TYPE="no"
 ```
 
 ## License
