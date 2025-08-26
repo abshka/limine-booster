@@ -14,8 +14,7 @@ The generated entries are fully compatible with `limine-snapper-sync` for BTRFS 
 - **Smart Hook Logic:** Intelligently processes only changed kernels or all kernels based on the type of update.
 - **Automatic Cleanup:** Removes entries when kernel packages are uninstalled.
 - **Smart Cmdline Detection:** Uses the command line from your running system (`/proc/cmdline`) for new entries.
-- **Automatic Microcode Detection:** Includes Intel/AMD microcode with proper ordering for optimal boot performance.
-- **Optimized Entry Positioning:** Places new kernel entries at the top of boot menu for better visibility and compatibility.
+- **Automatic Microcode Detection:** Includes Intel/AMD microcode if available.
 
 ## Installation
 
