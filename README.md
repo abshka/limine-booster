@@ -114,6 +114,55 @@ APPEND_INITRAMFS_TYPE="yes"
 APPEND_INITRAMFS_TYPE="no"
 ```
 
+## Migration from limine-mkinitcpio-hook
+
+If you have `limine-mkinitcpio-hook` installed, you should remove it to avoid conflicts:
+
+```bash
+sudo pacman -R limine-mkinitcpio-hook
+```
+
+The unified `limine-booster` now handles both Booster and mkinitcpio initramfs generation automatically.
+
+## Troubleshooting
+
+### limine-snapper-sync Errors
+
+When running `limine-snapper-sync`, you may see these errors:
+
+```
+bash: line 1: limine-reset-enroll: command not found
+bash: line 1: limine-enroll-config: command not found
+```
+
+These errors can be **safely ignored**. They occur because some optional limine-snapper-sync components are not installed, but the core snapshot functionality works perfectly. The important message is:
+
+```
+Saved successfully: /boot/limine.conf
+```
+
+### Entry Structure Issues
+
+If your boot entries appear outside the `/+Arch Linux` folder or in wrong order:
+
+1. **Clean the configuration** (backup first):
+
+   ```bash
+   sudo cp /boot/limine.conf /boot/limine.conf.backup
+   # Manually remove problematic entries, keeping only basic config and entries like /Windows
+   ```
+
+2. **Regenerate entries**:
+
+   ```bash
+   sudo limine-booster-update
+   ```
+
+3. **Run limine-snapper-sync** to update snapshots:
+   ```bash
+   sudo limine-snapper-sync
+   ```
+
 ## License
 
 This project is licensed under the GPLv3 License - see the [LICENSE](LICENSE) file for details.
