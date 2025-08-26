@@ -107,6 +107,7 @@ build_booster_image() {
         return 0
     fi
 
+    # Build booster initramfs
     if ! timeout 60 booster build --force --kernel-version "${kernel_ver}" "${output_path}"; then
         log_error "Booster build failed or timed out for kernel ${kernel_ver}"
     fi
@@ -114,107 +115,236 @@ build_booster_image() {
     log_info "Booster image successfully created: ${output_path}"
 }
 
+# Build mkinitcpio image
+build_mkinitcpio_image() {
+    local kernel_ver="$1"
+    local output_path="$2"
+
+    log_info "Building mkinitcpio image for kernel ${kernel_ver}..."
+
+    # Check if image already exists and is newer than 1 hour
+    if [[ -f "${output_path}" ]] && [[ $(find "${output_path}" -mmin -60 2>/dev/null) ]]; then
+        log_info "mkinitcpio image is recent, skipping rebuild: ${output_path}"
+        return 0
+    fi
+
+    # Build mkinitcpio initramfs
+    if ! timeout 120 mkinitcpio -k "${kernel_ver}" -g "${output_path}"; then
+        log_error "mkinitcpio build failed or timed out for kernel ${kernel_ver}"
+    fi
+
+    log_info "mkinitcpio image successfully created: ${output_path}"
+}
+
+# Detect available initramfs types for a kernel
+detect_initramfs_types() {
+    local pkg_name="$1"
+    local kernel_version="$2"
+    local dest_dir_abs="$3"
+    local types=()
+
+    case "${INITRAMFS_TYPES:-auto}" in
+        "booster")
+            if command -v booster &>/dev/null; then
+                types+=("booster")
+            fi
+            ;;
+        "mkinitcpio")
+            # Check if mkinitcpio is available for generation
+            if command -v mkinitcpio &>/dev/null; then
+                types+=("mkinitcpio")
+            fi
+            ;;
+        "both"|"auto")
+            # Check for booster
+            if command -v booster &>/dev/null; then
+                types+=("booster")
+            fi
+
+            # Check if mkinitcpio is available for generation
+            if command -v mkinitcpio &>/dev/null; then
+                types+=("mkinitcpio")
+            fi
+            ;;
+        *)
+            log_error "Unknown INITRAMFS_TYPES value: ${INITRAMFS_TYPES}. Supported: booster, mkinitcpio, both, auto"
+            ;;
+    esac
+
+    printf '%s\n' "${types[@]}"
+}
+
 # Limine entry management
 update_limine_entry() {
     local entry_name="$1"
     local kernel_path="$2"
-    local booster_path="$3"
+    local initramfs_path="$3"
+    local initramfs_type="$4"
 
     local temp_file
     temp_file=$(mktemp) || log_error "Failed to create temporary file"
 
-    local entry_exists=false
-    if grep -qF "/${entry_name}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
-        entry_exists=true
-        log_info "Updating existing entry: /${entry_name}"
-    else
-        log_info "Creating new entry: /${entry_name}"
-    fi
+    local main_entry="/+Arch Linux"
+    local sub_entry="//${entry_name}"
 
-    if ${entry_exists}; then
-        # Update existing entry
-        awk -v entry_name="/${entry_name}" \
-            -v kernel_path_new="    kernel_path: boot():${kernel_path}" \
-            -v booster_path_new="    module_path: boot():${booster_path}" \
-            -v microcode_path_new="    module_path: boot():${MICROCODE_PATH}" \
-            -v cmdline_new="    kernel_cmdline: ${KERNEL_CMDLINE}" \
-            -v enable_microcode="${ENABLE_MICROCODE:-no}" \
-            '
-            /^\// { in_block = 0 }
-            $0 == entry_name { in_block = 1 }
-            in_block && /^[[:space:]]*(kernel_path:|module_path:|kernel_cmdline:)/ { next }
-            { print }
-            in_block && $0 == entry_name {
-                # Correct order: kernel first, then microcode, then initramfs
+    log_info "Creating/updating limine-snapper-sync compatible entries"
+    log_info "Main entry: ${main_entry}"
+    log_info "Sub entry: ${sub_entry}"
+
+    # First pass: remove exis    print ""
+                sub_added = 1
+                snapshots_found = 1
+            }ting sub-entry if it exists
+    awk -v sub_entry="${sub_entry}" '
+        BEGIN { in_target = 0 }
+
+        # Start of our target sub-entry
+        $0 == sub_entry { in_target = 1; next }
+
+        # End of target when we hit another entry or main section
+        in_target && (/^\/\// || /^\/[^\/]/ || /^[[:space:]]*$/) {
+            in_target = 0
+            if (!/^[[:space:]]*$/) { print }
+            next
+        }
+
+        # Skip content inside our target entry
+        in_target { next }
+
+        # Print everything else
+        { print }
+    ' "${LIMINE_CONFIG_PATH}" > "${temp_file}.clean"
+
+    # Second pass: add/update main entry and our sub-entry
+    awk -v main_entry="${main_entry}" \
+        -v sub_entry="${sub_entry}" \
+        -v kernel_path_new="    kernel_path: boot():${kernel_path}" \
+        -v initramfs_path_new="    module_path: boot():${initramfs_path}" \
+        -v microcode_path_new="    module_path: boot():${MICROCODE_PATH}" \
+        -v cmdline_new="    kernel_cmdline: ${KERNEL_CMDLINE}" \
+        -v enable_microcode="${ENABLE_MICROCODE:-no}" \
+        -v machine_id="${MACHINE_ID}" \
+        '
+        BEGIN { main_found = 0; in_main = 0; sub_added = 0; snapshots_found = 0 }
+
+        # Found main entry
+        $0 == main_entry {
+            main_found = 1
+            in_main = 1
+            print $0
+            # Check if we need to add machine-id comment
+            getline next_line
+            if (next_line !~ /comment:.*machine-id/) {
+                print "    comment: machine-id=" machine_id
+            }
+            print next_line
+            next
+        }
+
+        # Inside main entry block
+        in_main {
+            # Check for //Snapshots section - insert our entry before it
+            if ($0 == "     //Snapshots" && !sub_added) {
+                print sub_entry
+                print "    protocol: linux"
+                print "    comment: Auto-generated for " entry_name
                 print kernel_path_new
                 if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
                     print microcode_path_new
                 }
-                print booster_path_new
+                print initramfs_path_new
+                if (cmdline_new != "    kernel_cmdline: ") {
+                    print cmdline_new
+                }
+                print ""
+                sub_added = 1
+                snapshots_found = 1
+            }
+
+            # Hit another main entry, end our block
+            if (/^\/[^\/]/) {
+                in_main = 0
+                if (!sub_added) {
+                    print sub_entry
+                    print "    protocol: linux"
+                    print "    comment: Auto-generated for " entry_name
+                    print kernel_path_new
+                    if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
+                        print microcode_path_new
+                    }
+                    print initramfs_path_new
+                    if (cmdline_new != "    kernel_cmdline: ") {
+                        print cmdline_new
+                    }
+                    print ""
+                    sub_added = 1
+                }
+            }
+            print
+            next
+        }
+
+        # Not in main block yet, check if we should create it
+        !main_found && /^\/[^\/]/ {
+            # Insert main entry before first OS entry
+            print main_entry
+            print "    comment: machine-id=" machine_id
+            print sub_entry
+            print "    protocol: linux"
+            print "    comment: Auto-generated for " entry_name
+            print kernel_path_new
+            if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
+                print microcode_path_new
+            }
+            print initramfs_path_new
+            if (cmdline_new != "    kernel_cmdline: ") {
+                print cmdline_new
+            }
+            print ""
+            main_found = 1
+            sub_added = 1
+        }
+
+        # Print all other lines
+        { print }
+
+        END {
+            # If we were still in main block and no snapshots found, add our entry
+            if (in_main && !sub_added && !snapshots_found) {
+                print sub_entry
+                print "    protocol: linux"
+                print "    comment: Auto-generated for " entry_name
+                print kernel_path_new
+                if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
+                    print microcode_path_new
+                }
+                print initramfs_path_new
                 if (cmdline_new != "    kernel_cmdline: ") {
                     print cmdline_new
                 }
             }
-            ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
-    else
-        # Create new entry at the top of the file
-        local found_first_entry=false
+            # If no main entry was found, add everything at the end
+            else if (!main_found) {
+                if (NR > 0) print ""
+                print main_entry
+                print "    comment: machine-id=" machine_id
+                print sub_entry
+                print "    protocol: linux"
+                print "    comment: Auto-generated for " entry_name
+                print kernel_path_new
+                if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
+                    print microcode_path_new
+                }
+                print initramfs_path_new
+                if (cmdline_new != "    kernel_cmdline: ") {
+                    print cmdline_new
+                }
+            }
+        }
+    ' entry_name="${entry_name}" "${temp_file}.clean" > "${temp_file}"
 
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            # Check if this is the first boot entry
-            if [[ "${line}" =~ ^/[^/] ]] && ! ${found_first_entry}; then
-                found_first_entry=true
-                # Insert our new entry before the first existing entry
-                printf "/%s\n" "${entry_name}"
-                printf "    protocol: linux\n"
-
-                # Extract package name for comment (remove "Arch Linux (" and ")")
-                local clean_comment="${entry_name#Arch Linux (}"
-                clean_comment="${clean_comment%)}"
-                printf "    comment: Auto-generated for %s\n" "${clean_comment}"
-
-                printf "    kernel_path: boot():%s\n" "${kernel_path}"
-
-                if [[ -n "${MICROCODE_PATH}" ]]; then
-                    printf "    module_path: boot():%s\n" "${MICROCODE_PATH}"
-                fi
-
-                printf "    module_path: boot():%s\n" "${booster_path}"
-
-                if [[ -n "${KERNEL_CMDLINE}" ]]; then
-                    printf "    kernel_cmdline: %s\n" "${KERNEL_CMDLINE}"
-                fi
-                printf "\n"
-            fi
-            printf "%s\n" "${line}"
-        done < "${LIMINE_CONFIG_PATH}" > "${temp_file}"
-
-        # If no existing entries found, append at the end
-        if ! ${found_first_entry}; then
-            {
-                cat "${temp_file}"
-                printf "/%s\n" "${entry_name}"
-                printf "    protocol: linux\n"
-
-                local clean_comment="${entry_name#Arch Linux (}"
-                clean_comment="${clean_comment%)}"
-                printf "    comment: Auto-generated for %s\n" "${clean_comment}"
-
-                printf "    kernel_path: boot():%s\n" "${kernel_path}"
-
-                if [[ -n "${MICROCODE_PATH}" ]]; then
-                    printf "    module_path: boot():%s\n" "${MICROCODE_PATH}"
-                fi
-
-                printf "    module_path: boot():%s\n" "${booster_path}"
-
-                if [[ -n "${KERNEL_CMDLINE}" ]]; then
-                    printf "    kernel_cmdline: %s\n" "${KERNEL_CMDLINE}"
-                fi
-            } > "${temp_file}.new"
-            mv "${temp_file}.new" "${temp_file}"
-        fi
-    fi
+    # Clean up temporary file
+    rm -f "${temp_file}.clean"
 
     # Atomic replacement
     if mv "${temp_file}" "${LIMINE_CONFIG_PATH}"; then
@@ -231,7 +361,7 @@ process_kernel_package() {
 
     log_info "Processing kernel package: ${pkg_name}"
 
-    # Package existence check
+    # Quick package existence check
     if ! pacman -Q "${pkg_name}" &>/dev/null; then
         log_error "Package ${pkg_name} is not installed"
     fi
@@ -248,7 +378,6 @@ process_kernel_package() {
     local dest_dir_abs="/boot${dest_dir_rel}"
     local kernel_source="/boot/vmlinuz-${pkg_name}"
     local kernel_dest="${dest_dir_abs}/vmlinuz-${pkg_name}"
-    local booster_dest="${dest_dir_abs}/booster-${pkg_name}.img"
 
     # Create destination directory
     mkdir -p "${dest_dir_abs}" || log_error "Failed to create directory: ${dest_dir_abs}"
@@ -263,15 +392,54 @@ process_kernel_package() {
         log_error "Kernel image not found: ${kernel_source}"
     fi
 
-    # Build Booster image
-    build_booster_image "${kernel_version}" "${booster_dest}"
+    # Detect available initramfs types
+    local initramfs_types
+    readarray -t initramfs_types < <(detect_initramfs_types "${pkg_name}" "${kernel_version}" "${dest_dir_abs}")
 
-    # Update Limine configuration
-    local entry_title="Arch Linux (${pkg_name})"
+    if [[ ${#initramfs_types[@]} -eq 0 ]]; then
+        log_info "No supported initramfs types found for ${pkg_name}. Skipping."
+        return 0
+    fi
+
     local kernel_image_path="${dest_dir_rel}/vmlinuz-${pkg_name}"
-    local booster_image_path="${dest_dir_rel}/booster-${pkg_name}.img"
 
-    update_limine_entry "${entry_title}" "${kernel_image_path}" "${booster_image_path}"
+    # Process each initramfs type
+    for initramfs_type in "${initramfs_types[@]}"; do
+        log_info "Creating entry for ${pkg_name} with ${initramfs_type}"
+
+        case "${initramfs_type}" in
+            "booster")
+                local booster_dest="${dest_dir_abs}/booster-${pkg_name}.img"
+                build_booster_image "${kernel_version}" "${booster_dest}"
+                local initramfs_path="${dest_dir_rel}/booster-${pkg_name}.img"
+                if [[ "${APPEND_INITRAMFS_TYPE:-yes}" == "yes" ]]; then
+                    local entry_suffix=" (Booster)"
+                else
+                    local entry_suffix=""
+                fi
+                ;;
+            "mkinitcpio")
+                # Generate mkinitcpio initramfs in managed location
+                local mkinitcpio_dest="${dest_dir_abs}/initramfs-${pkg_name}.img"
+                build_mkinitcpio_image "${kernel_version}" "${mkinitcpio_dest}"
+                local initramfs_path="${dest_dir_rel}/initramfs-${pkg_name}.img"
+
+                if [[ "${APPEND_INITRAMFS_TYPE:-yes}" == "yes" ]]; then
+                    local entry_suffix=" (mkinitcpio)"
+                else
+                    local entry_suffix=""
+                fi
+                ;;
+            *)
+                log_info "Unknown initramfs type: ${initramfs_type}"
+                continue
+                ;;
+        esac
+
+        # Update Limine configuration
+        local entry_title="${pkg_name} ${kernel_version}${entry_suffix}"
+        update_limine_entry "${entry_title}" "${kernel_image_path}" "${initramfs_path}" "${initramfs_type}"
+    done
 }
 
 # Hook mode processing
