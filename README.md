@@ -114,15 +114,29 @@ APPEND_INITRAMFS_TYPE="yes"
 APPEND_INITRAMFS_TYPE="no"
 ```
 
-## Migration from limine-mkinitcpio-hook
+## Working with limine-mkinitcpio-hook
 
-If you have `limine-mkinitcpio-hook` installed, you should remove it to avoid conflicts:
+**Important**: Keep `limine-mkinitcpio-hook` installed for proper snapshot functionality, but disable its conflicting hook:
+
+### Step 1: Install limine-mkinitcpio-hook (if not already installed)
 
 ```bash
-sudo pacman -R limine-mkinitcpio-hook
+sudo pacman -S limine-mkinitcpio-hook
 ```
 
-The unified `limine-booster` now handles both Booster and mkinitcpio initramfs generation automatically.
+### Step 2: Disable the conflicting hook
+
+```bash
+sudo mv /etc/pacman.d/hooks/90-mkinitcpio-install.hook /etc/pacman.d/hooks/90-mkinitcpio-install.hook.disabled
+```
+
+### Why this approach?
+
+- **limine-mkinitcpio-hook** provides essential commands (`limine-reset-enroll`, `limine-enroll-config`) needed by `limine-snapper-sync`
+- **The hook conflict** causes duplicate entry management, leading to malformed boot configurations
+- **Disabling only the hook** keeps the tools available while letting `limine-booster` handle entry creation
+
+The unified `limine-booster` now handles both Booster and mkinitcpio initramfs generation automatically, while `limine-mkinitcpio-hook` provides the snapshot infrastructure.
 
 ## Troubleshooting
 
@@ -135,7 +149,7 @@ bash: line 1: limine-reset-enroll: command not found
 bash: line 1: limine-enroll-config: command not found
 ```
 
-These errors can be **safely ignored**. They occur because some optional limine-snapper-sync components are not installed, but the core snapshot functionality works perfectly. The important message is:
+If you see these errors, it usually means `limine-mkinitcpio-hook` is not installed. Install it following the migration guide above. If you still see these errors after installation, they can be **safely ignored** as the core snapshot functionality works perfectly. The important message is:
 
 ```
 Saved successfully: /boot/limine.conf
