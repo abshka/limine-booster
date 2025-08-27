@@ -1,3 +1,4 @@
+# System-wide changes that affect all kernels
 [Trigger]
 Type = Path
 Operation = Install
@@ -8,6 +9,7 @@ Target = usr/lib/firmware/*
 Target = usr/lib/modules/*/extramodules/
 Target = usr/src/*/dkms.conf
 
+# Kernel-specific changes (kernel installation/removal)
 [Trigger]
 Type = Path
 Operation = Install
@@ -15,6 +17,7 @@ Operation = Upgrade
 Operation = Remove
 Target = usr/lib/modules/*/vmlinuz
 
+# Booster package changes
 [Trigger]
 Type = Package
 Operation = Install
@@ -22,6 +25,7 @@ Operation = Upgrade
 Target = booster
 Target = booster-git
 
+# Execute limine-booster after package transactions
 [Action]
 Description = Updating Limine entries with Booster initramfs...
 When = PostTransaction
