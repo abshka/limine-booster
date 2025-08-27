@@ -1,15 +1,16 @@
 # Maintainer: Alexander Belov markelofaleksei@gmail.com
 pkgname=limine-booster
-pkgver=2.4.0
+pkgver=2.5.0
 pkgrel=1
-pkgdesc="Zero-config automation for Limine boot entries with Booster"
+pkgdesc="Zero-config automation for Limine boot entries with Booster and mkinitcpio support, including AUR kernels"
 arch=('any')
 url="https://github.com/abshka/limine-booster"
 license=('GPL3')
 depends=('booster' 'limine')
 optdepends=('intel-ucode: For automatic detection and inclusion of Intel microcode'
             'amd-ucode: For automatic detection and inclusion of AMD microcode'
-            'mkinitcpio: For generating traditional initramfs images')
+            'mkinitcpio: For generating traditional initramfs images'
+            'limine-snapper-sync: For BTRFS snapshot integration')
 source=("$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
