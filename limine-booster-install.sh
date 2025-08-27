@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Import functions and environment variables
+# Import limine common functions and environment variables
 LIMINE_FUNCTIONS_PATH=/usr/lib/limine/limine-common-functions
 # shellcheck disable=SC1090
 if [[ -f "${LIMINE_FUNCTIONS_PATH}" ]]; then
@@ -10,7 +10,7 @@ if [[ -f "${LIMINE_FUNCTIONS_PATH}" ]]; then
     }
     initialize_header || exit 1
 else
-    # Fallback for systems without limine-common-functions
+    # Fallback for systems without limine common functions
     echo ">>> [limine-booster] Starting Booster initramfs generation..."
     MACHINE_ID=$(cat /etc/machine-id)
     ESP_PATH="/boot"
@@ -22,14 +22,52 @@ removed_kernels=()
 has_kernel_changes=0
 has_system_changes=0
 
-# Read input and categorize changes
+# Extract package name from existing limine.conf entries by kernel version
+extract_package_from_limine_conf() {
+    local kernel_version="$1"
+    local config_file="/boot/limine.conf"
+
+    # Input validation
+    [[ -n "${kernel_version}" ]] || return 1
+
+    if [[ ! -f "${config_file}" ]]; then
+        return 1
+    fi
+
+    # Look for entries that contain this kernel version
+    # Pattern: //package_name version_info
+    local pkg_name=""
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ^[[:space:]]*//([a-zA-Z0-9_-]+)[[:space:]]+.*"${kernel_version}".* ]]; then
+            pkg_name="${BASH_REMATCH[1]}"
+            echo "${pkg_name}"
+            return 0
+        fi
+    done < "${config_file}"
+
+    # Alternative: match linux package entries with version pattern matching
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ^[[:space:]]*//([a-zA-Z0-9_-]*linux[a-zA-Z0-9_-]*)[[:space:]]+ ]]; then
+            pkg_name="${BASH_REMATCH[1]}"
+            # Check if package name appears in kernel version
+            if echo "${kernel_version}" | grep -q "${pkg_name#linux-}" 2>/dev/null; then
+                echo "${pkg_name}"
+                return 0
+            fi
+        fi
+    done < "${config_file}"
+
+    return 1
+}
+
+# Process pacman hook input and categorize changes
 while read -r line; do
     if [[ "${line}" == */vmlinuz ]]; then
-        # Direct kernel changes
+        # Direct kernel file changes
         kernel_dir="/${line%/vmlinuz}"
         kernel_targets+=("${kernel_dir}")
         has_kernel_changes=1
-        
+
         # Check if this is a removal (kernel directory no longer exists)
         if [[ ! -d "${kernel_dir}" ]]; then
             removed_kernels+=("${kernel_dir}")
@@ -38,12 +76,12 @@ while read -r line; do
          [[ "${line}" =~ usr/lib/initcpio/ ]] || \
          [[ "${line}" =~ usr/src/.*/dkms\.conf ]] || \
          [[ "${line}" =~ usr/lib/modules/.*/extramodules/ ]]; then
-        # System changes that affect all kernels
+        # System-wide changes that affect all installed kernels
         has_system_changes=1
     fi
 done
 
-# Determine processing mode
+# Determine processing mode based on detected changes
 if [[ ${has_system_changes} -eq 1 ]] || [[ ${#kernel_targets[@]} -eq 0 && ${has_kernel_changes} -eq 0 ]]; then
     echo ">>> [limine-booster] System changes detected, processing all kernels..."
     process_all=1
@@ -52,103 +90,159 @@ elif [[ ${has_kernel_changes} -eq 1 ]]; then
     echo ">>> [limine-booster] Kernel-specific changes detected, processing ${#kernel_targets[@]} kernels..."
 fi
 
-# Mutex lock if function is available
+# Use limine mutex lock if available
 if command -v mutex_lock &> /dev/null; then
     mutex_lock "limine-booster-install"
 fi
 
-# Reset enroll config if function is available
+# Reset limine enroll config if available
 if command -v reset_enroll_config &> /dev/null; then
     reset_enroll_config
 fi
 
-# Handle removed kernels first
+# Process removed kernels first (cleanup before adding new entries)
 for removed_dir in "${removed_kernels[@]}"; do
-    if [[ -n "${removed_dir}" ]]; then
-        # Extract package name from removed kernel directory
+    if [[ -n "${removed_dir}" && -n "${removed_dir##*/}" ]]; then
+        # Extract kernel version from directory path
         kVer="${removed_dir##*/}"
         echo "Removing entries for deleted kernel: ${kVer}"
-        
-        # Try to determine package name from kernel version
+
+        # Determine package name for the removed kernel
         pkgBase=""
-        case "${kVer}" in
-            *-lts) pkgBase="linux-lts" ;;
-            *-zen*) pkgBase="linux-zen" ;;
-            *-cachyos-rc*) pkgBase="linux-cachyos-rc" ;;
-            *-cachyos*) pkgBase="linux-cachyos" ;;
-            *) 
-                # Try to extract package name from kernel version pattern
-                pkgBase=$(echo "${kVer}" | sed -E 's/^[0-9]+\.[0-9]+.*-[0-9]+-(.+)$/linux-\1/' | sed 's/-$//')
-                [[ "${pkgBase}" == "linux-" ]] && pkgBase="linux"
-                ;;
-        esac
-        
+        # First try: check if pkgbase file still exists
+        if [[ -f "${removed_dir}/pkgbase" ]]; then
+            pkgBase="$(<"${removed_dir}/pkgbase")"
+        else
+            # Fallback: extract package name from existing limine.conf entries
+            pkgBase=$(extract_package_from_limine_conf "${kVer}")
+
+            # Last resort: pattern matching based on kernel version
+            if [[ -z "${pkgBase}" ]]; then
+                case "${kVer}" in
+                    *-nitrous*) pkgBase="linux-nitrous" ;;
+                    *-cachyos-lts*) pkgBase="linux-cachyos-lts" ;;
+                    *-cachyos-rc*) pkgBase="linux-cachyos-rc" ;;
+                    *-cachyos-bore*) pkgBase="linux-cachyos-bore" ;;
+                    *-cachyos-bmq*) pkgBase="linux-cachyos-bmq" ;;
+                    *-cachyos-pds*) pkgBase="linux-cachyos-pds" ;;
+                    *-cachyos-tt*) pkgBase="linux-cachyos-tt" ;;
+                    *-cachyos*) pkgBase="linux-cachyos" ;;
+                    *-zen*) pkgBase="linux-zen" ;;
+                    *-lts*) pkgBase="linux-lts" ;;
+                    *-hardened*) pkgBase="linux-hardened" ;;
+                    *-rt*) pkgBase="linux-rt" ;;
+                    *-rt-lts*) pkgBase="linux-rt-lts" ;;
+                    *-xanmod*) pkgBase="linux-xanmod" ;;
+                    *-clear*) pkgBase="linux-clear" ;;
+                    *-arch*) pkgBase="linux" ;;
+                    *)
+                        # Advanced extraction for custom/AUR kernels
+                        # Pattern: X.Y.Z-N-SUFFIX -> linux-SUFFIX
+                        if [[ "${kVer}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?-[0-9]+-(.+)$ ]]; then
+                            suffix="${BASH_REMATCH[2]}"
+                            # Remove common arch suffixes
+                            suffix=$(echo "${suffix}" | sed -E 's/-(x86_64|ARCH)$//')
+                            if [[ "${suffix}" != "ARCH" && "${suffix}" != "arch" ]]; then
+                                pkgBase="linux-${suffix}"
+                            else
+                                pkgBase="linux"
+                            fi
+                        else
+                            # Default fallback
+                            pkgBase="linux"
+                        fi
+                        ;;
+                esac
+            fi
+        fi
+
         if [[ -n "${pkgBase}" ]]; then
             echo "Detected removed package: ${pkgBase}"
-            # Remove Limine entry and clean up files
-            /usr/bin/limine-booster-remove "${pkgBase}" 2>/dev/null || {
+            # Remove Limine entries and clean up files
+            if ! /usr/bin/limine-booster-remove "${pkgBase}" 2>/dev/null; then
                 echo "WARNING: Failed to clean up entry for ${pkgBase}" >&2
-            }
+            fi
+        else
+            echo "WARNING: Could not determine package name for removed kernel: ${kVer}" >&2
         fi
     fi
 done
 
-# Process existing/new kernel directories
+# Process existing/new kernel directories for entry creation
 for line in "${kernel_targets[@]}"; do
-    # Skip if this was a removed kernel (already handled above)
+    # Skip kernels that were already removed (handled above)
     if [[ " ${removed_kernels[*]} " =~ " ${line} " ]]; then
         continue
     fi
     
+    # Skip if pkgbase file is not owned by any package
     if ! pacman -Qqo "${line}/pkgbase" &>/dev/null; then
-        # Skip kernel if pkgBase does not belong to any package
+        continue
+    fi
+
+    if [[ ! -f "${line}/pkgbase" ]]; then
+        echo "WARNING: pkgbase file missing for ${line}" >&2
         continue
     fi
 
     pkgBase="$(<"${line}/pkgbase")"
     kVer="${line##*/}"
+    
+    # Validate extracted data
+    if [[ -z "${pkgBase}" || -z "${kVer}" ]]; then
+        echo "WARNING: Invalid package or kernel version data for ${line}" >&2
+        continue
+    fi
 
     kDirPath="${ESP_PATH}/${MACHINE_ID}/${pkgBase}"
     
     booster_path="${kDirPath}/booster-${pkgBase}.img"
     vmlinuz_path="${kDirPath}/vmlinuz-${pkgBase}"
 
-    # Create kernel directory
-    install -dm700 "${kDirPath}"
-    install -Dm600 "${line}/vmlinuz" "${vmlinuz_path}"
+    # Create kernel directory with secure permissions
+    if ! install -dm700 "${kDirPath}"; then
+        echo "ERROR: Failed to create kernel directory: ${kDirPath}" >&2
+        continue
+    fi
+    
+    # Copy kernel image to boot directory
+    if ! install -Dm600 "${line}/vmlinuz" "${vmlinuz_path}"; then
+        echo "ERROR: Failed to install kernel: ${vmlinuz_path}" >&2
+        continue
+    fi
 
     echo "Building Booster initramfs for ${pkgBase} (${kVer})"
     
-    # Build Booster image
+    # Build Booster initramfs image
     if ! booster build --force --kernel-version "${kVer}" "${booster_path}"; then
         echo "ERROR: Booster build failed for kernel ${kVer}" >&2
         continue
     fi
     
-    # Use our script for proper entry management
+    # Update Limine configuration with proper entry management
     if [[ ${process_all} -eq 1 ]]; then
-        # For system-wide changes, use manual sync mode
-        /usr/bin/limine-booster-update 2>/dev/null || {
+        # System-wide changes: process all kernels at once
+        if ! /usr/bin/limine-booster-update 2>/dev/null; then
             echo "ERROR: Failed to update Limine entries" >&2
-        }
+        fi
         break  # Only need to run once for all kernels
     else
-        # For specific kernel changes, use hook mode
-        /usr/bin/limine-booster-update "${line}/vmlinuz" 2>/dev/null || {
+        # Kernel-specific changes: process individual kernel
+        if ! /usr/bin/limine-booster-update "${line}/vmlinuz" 2>/dev/null; then
             echo "ERROR: Failed to update Limine entry for ${pkgBase}" >&2
-        }
+        fi
     fi
     
     echo "Kernel stored in: ${vmlinuz_path}"
     echo "Booster initramfs stored in: ${booster_path}"
 done
 
-# Enroll config if function is available
+# Enroll limine config if available
 if command -v enroll_config &> /dev/null; then
     enroll_config
 fi
 
-# Unlock mutex if function is available
+# Release limine mutex if available
 if command -v mutex_unlock &> /dev/null; then
     mutex_unlock
 fi
