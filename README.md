@@ -4,7 +4,7 @@ A zero-configuration, automated tool to manage Limine bootloader entries for Arc
 
 This tool provides a pacman hook that automatically creates and updates Limine entries for all installed kernels, using the command line from your currently running system. No manual configuration is required.
 
-The generated entries are fully compatible with `limine-snapper-sync` for BTRFS snapshot management, including automatic OS detection via machine-id.
+The generated entries are fully compatible with `limine-snapper-sync` for BTRFS snapshot management. When kernels are removed, the tool automatically calls `limine-snapper-sync` to update snapshot entries, ensuring complete integration.
 
 ## Features
 
@@ -12,9 +12,10 @@ The generated entries are fully compatible with `limine-snapper-sync` for BTRFS 
 - **Fully Automated:** A pacman hook handles everything automatically when you install, upgrade, or remove any kernel.
 - **Multi-Kernel Support:** Automatically creates and manages separate entries for all installed kernels (e.g., `linux`, `linux-lts`, `linux-zen`).
 - **Smart Hook Logic:** Intelligently processes only changed kernels or all kernels based on the type of update.
-- **Automatic Cleanup:** Removes entries when kernel packages are uninstalled.
+- **Automatic Cleanup:** Removes entries when kernel packages are uninstalled and automatically calls `limine-snapper-sync` to update snapshots.
 - **Smart Cmdline Detection:** Uses the command line from your running system (`/proc/cmdline`) for new entries.
 - **Automatic Microcode Detection:** Includes Intel/AMD microcode if available.
+- **Enhanced AUR Support:** Robust detection and handling of AUR kernels with advanced pattern matching.
 
 ## Installation
 
@@ -62,13 +63,15 @@ For example, after installing the `linux-lts` package with both Booster and mkin
     kernel_cmdline: your-kernel-parameters
 ```
 
-### limine-snapper-sync Compatibility
+### limine-snapper-sync Integration
 
-The generated format is fully compatible with `limine-snapper-sync`:
+The tool is fully integrated with `limine-snapper-sync`:
 
 - **Machine-ID Detection**: The main entry includes `comment: machine-id=<machine-id>` which allows `limine-snapper-sync` to automatically target the correct OS entry regardless of the OS name configuration.
 - **Proper Module Order**: Microcode is placed after the kernel and before the initramfs for optimal boot performance.
 - **Snapshot Integration**: The `/+` prefix enables automatic BTRFS snapshot functionality.
+- **Automatic Synchronization**: When kernels are removed, `limine-booster` automatically calls `limine-snapper-sync` to update snapshot entries, ensuring consistency between main entries and snapshots.
+- **Separation of Concerns**: `limine-booster` manages only the main `/+Arch Linux` section, while `limine-snapper-sync` handles all `//Snapshots` entries.
 
 ### Advanced Configuration (Optional)
 
@@ -154,6 +157,15 @@ If you see these errors, it usually means `limine-mkinitcpio-hook` is not instal
 Saved successfully: /boot/limine.conf
 ```
 
+### AUR Kernel Support
+
+This tool provides robust support for AUR and custom kernels:
+
+- **Dual Detection Method**: Searches both `/usr/lib/modules/*/vmlinuz` (standard) and `/boot/vmlinuz-*` (AUR/custom) locations
+- **Smart Package Detection**: Uses advanced pattern matching to correctly identify AUR kernel packages during removal
+- **Enhanced Fallback Logic**: When package information is unavailable, uses intelligent pattern matching based on kernel version strings
+- **Automatic Cleanup**: Properly removes entries for AUR kernels using the same automated `limine-snapper-sync` integration
+
 ### Entry Structure Issues
 
 If your boot entries appear outside the `/+Arch Linux` folder or in wrong order:
@@ -171,10 +183,25 @@ If your boot entries appear outside the `/+Arch Linux` folder or in wrong order:
    sudo limine-booster-update
    ```
 
-3. **Run limine-snapper-sync** to update snapshots:
+3. **Update snapshots** (this happens automatically during kernel removal, but can be run manually):
    ```bash
    sudo limine-snapper-sync
    ```
+
+### Manual Operations
+
+For manual entry management:
+
+```bash
+# Update all kernel entries
+sudo limine-booster-update
+
+# Remove specific kernel entries
+sudo limine-booster-remove <package-name>
+
+# Update snapshots (happens automatically after removal)
+sudo limine-snapper-sync
+```
 
 ## License
 
