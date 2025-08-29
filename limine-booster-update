@@ -169,69 +169,16 @@ build_booster_image() {
     return 0
 }
 
-# Build mkinitcpio initramfs image for specified kernel
-build_mkinitcpio_image() {
-    local kernel_ver="$1"
-    local output_path="$2"
 
-    # Input validation
-    [[ -n "${kernel_ver}" ]] || log_error "Kernel version cannot be empty"
-    [[ -n "${output_path}" ]] || log_error "Output path cannot be empty"
 
-    log_info "Building mkinitcpio image for kernel ${kernel_ver}..."
-
-    # Skip rebuild if image exists and is recent (within 1 hour)
-    if [[ -f "${output_path}" ]] && [[ $(find "${output_path}" -mmin -60 2>/dev/null) ]]; then
-        log_info "mkinitcpio image is recent, skipping rebuild: ${output_path}"
+# Check if booster is available
+check_booster_available() {
+    if command -v booster &>/dev/null; then
         return 0
-    fi
-
-    # Build mkinitcpio initramfs
-    if ! timeout 120 mkinitcpio -k "${kernel_ver}" -g "${output_path}"; then
-        printf "!!! [%s] ERROR: mkinitcpio build failed or timed out for kernel %s\n" "${SCRIPT_NAME}" "${kernel_ver}" >&2
+    else
+        log_error "Booster command not found. Please install the 'booster' package."
         return 1
     fi
-
-    log_info "mkinitcpio image successfully created: ${output_path}"
-    return 0
-}
-
-# Detect available initramfs types for a kernel
-detect_initramfs_types() {
-    local pkg_name="$1"
-    local kernel_version="$2"
-    local dest_dir_abs="$3"
-    local types=()
-
-    case "${INITRAMFS_TYPES:-auto}" in
-        "booster")
-            if command -v booster &>/dev/null; then
-                types+=("booster")
-            fi
-            ;;
-        "mkinitcpio")
-            # Check if mkinitcpio is available for generation
-            if command -v mkinitcpio &>/dev/null; then
-                types+=("mkinitcpio")
-            fi
-            ;;
-        "both"|"auto")
-            # Check for booster
-            if command -v booster &>/dev/null; then
-                types+=("booster")
-            fi
-
-            # Check if mkinitcpio is available for generation
-            if command -v mkinitcpio &>/dev/null; then
-                types+=("mkinitcpio")
-            fi
-            ;;
-        *)
-            log_error "Unknown INITRAMFS_TYPES value: ${INITRAMFS_TYPES}. Supported: booster, mkinitcpio, both, auto"
-            ;;
-    esac
-
-    printf '%s\n' "${types[@]}"
 }
 
 # Limine entry management for main section only
@@ -284,7 +231,7 @@ update_limine_entry() {
         -v enable_microcode="${ENABLE_MICROCODE:-no}" \
         -v machine_id="${MACHINE_ID}" \
         '
-        BEGIN { 
+        BEGIN {
             main_found = 0; in_main = 0; sub_added = 0
             # Validate required variables
             if (kernel_path_new == "    kernel_path: boot():") {
@@ -442,62 +389,33 @@ process_kernel_package() {
         log_error "Kernel image not found: ${kernel_source}"
     fi
 
-    # Detect available initramfs types
-    local initramfs_types
-    readarray -t initramfs_types < <(detect_initramfs_types "${pkg_name}" "${kernel_version}" "${dest_dir_abs}")
-
-    if [[ ${#initramfs_types[@]} -eq 0 ]]; then
-        log_info "No supported initramfs types found for ${pkg_name}. Skipping."
+    # Check if booster is available
+    if ! check_booster_available; then
+        log_info "Booster not available for ${pkg_name}. Skipping."
         return 0
     fi
 
     local kernel_image_path="${dest_dir_rel}/vmlinuz-${pkg_name}"
 
-    # Process each initramfs type
-    for initramfs_type in "${initramfs_types[@]}"; do
-        log_info "Creating entry for ${pkg_name} with ${initramfs_type}"
+    # Create booster initramfs
+    log_info "Creating entry for ${pkg_name} with Booster"
 
-        case "${initramfs_type}" in
-            "booster")
-                local booster_dest="${dest_dir_abs}/booster-${pkg_name}.img"
-                if ! build_booster_image "${kernel_version}" "${booster_dest}"; then
-                    continue
-                fi
-                local initramfs_path="${dest_dir_rel}/booster-${pkg_name}.img"
-                if [[ "${APPEND_INITRAMFS_TYPE:-yes}" == "yes" ]]; then
-                    local entry_suffix=" (Booster)"
-                else
-                    local entry_suffix=""
-                fi
-                ;;
-            "mkinitcpio")
-                # Generate mkinitcpio initramfs in managed location
-                local mkinitcpio_dest="${dest_dir_abs}/initramfs-${pkg_name}.img"
-                if ! build_mkinitcpio_image "${kernel_version}" "${mkinitcpio_dest}"; then
-                    continue
-                fi
-                local initramfs_path="${dest_dir_rel}/initramfs-${pkg_name}.img"
+    local booster_dest="${dest_dir_abs}/booster-${pkg_name}.img"
+    if ! build_booster_image "${kernel_version}" "${booster_dest}"; then
+        log_error "Failed to build Booster image for ${pkg_name}"
+        return 1
+    fi
 
-                if [[ "${APPEND_INITRAMFS_TYPE:-yes}" == "yes" ]]; then
-                    local entry_suffix=" (mkinitcpio)"
-                else
-                    local entry_suffix=""
-                fi
-                ;;
-            *)
-                log_info "Unknown initramfs type: ${initramfs_type}"
-                continue
-                ;;
-        esac
+    local initramfs_path="${dest_dir_rel}/booster-${pkg_name}.img"
+    local entry_title="${pkg_name} ${kernel_version}"
 
-        # Update Limine configuration
-        local entry_title="${pkg_name} ${kernel_version}${entry_suffix}"
-        if ! update_limine_entry "${entry_title}" "${kernel_image_path}" "${initramfs_path}" "${initramfs_type}"; then
-            log_error "Failed to update Limine entry for ${pkg_name} with ${initramfs_type}"
-            continue
-        fi
-        log_info "Successfully created entry for ${pkg_name} with ${initramfs_type}"
-    done
+    # Update Limine configuration
+    if ! update_limine_entry "${entry_title}" "${kernel_image_path}" "${initramfs_path}" "booster"; then
+        log_error "Failed to update Limine entry for ${pkg_name}"
+        return 1
+    fi
+
+    log_info "Successfully created entry for ${pkg_name} with Booster"
 }
 
 # Hook mode processing
@@ -555,7 +473,6 @@ remove_kernel_entry() {
     local temp_file
     temp_file=$(mktemp) || log_error "Failed to create temporary file"
 
-    # Check if any entries exist for this package (improved pattern matching)
     # Look for entries with package name followed by space, version, dash, or end of line
     local found_entries=0
     if grep -qE "^[[:space:]]*//${pkg_name}( [0-9]| - |$)" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
@@ -573,27 +490,27 @@ remove_kernel_entry() {
     # Remove entries from main /+Arch Linux section only
     # Snapshots are automatically updated by limine-snapper-sync after removal
     awk -v pkg_name="${pkg_name}" '
-        BEGIN { 
+        BEGIN {
             skip = 0
         }
-        
+
         # Start skipping when we find a matching entry
         # Match exact package name followed by space, end of line, or specific delimiters
         /^[[:space:]]*\/\/[a-zA-Z0-9_-]+($|[[:space:]])/ {
             # Extract package name from the line
             line = $0
             gsub(/^[[:space:]]*\/\//, "", line)
-            
+
             # Find the package name - everything before first space or end of string
             split(line, parts, /[[:space:]]/)
             entry_pkg = parts[1]
-            
+
             if (entry_pkg == pkg_name) {
                 skip = 1
                 next
             }
         }
-        
+
         # Stop skipping when we hit another entry or main section
         skip && (/^[[:space:]]*\/\// || /^[[:space:]]*\/[^\/]/) {
             skip = 0
@@ -603,7 +520,7 @@ remove_kernel_entry() {
                 gsub(/^[[:space:]]*\/\//, "", line)
                 split(line, parts, /[[:space:]]/)
                 entry_pkg = parts[1]
-                
+
                 if (entry_pkg == pkg_name) {
                     skip = 1
                     next
@@ -612,12 +529,12 @@ remove_kernel_entry() {
             print
             next
         }
-        
+
         # Skip content of entries being removed
         skip {
             next
         }
-        
+
         # Keep all other lines
         {
             print
@@ -627,7 +544,7 @@ remove_kernel_entry() {
     # Atomic replacement with proper error handling
     if mv "${temp_file}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
         log_info "Successfully removed entries for kernel package: ${pkg_name}"
-        
+
         # Automatically update Snapshots entries after successful removal
         if command -v limine-snapper-sync >/dev/null 2>&1; then
             log_info "Updating Snapshots entries with limine-snapper-sync..."

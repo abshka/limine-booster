@@ -4,7 +4,6 @@ Type = Path
 Operation = Install
 Operation = Upgrade
 Operation = Remove
-Target = usr/lib/initcpio/*
 Target = usr/lib/firmware/*
 Target = usr/lib/modules/*/extramodules/
 Target = usr/src/*/dkms.conf

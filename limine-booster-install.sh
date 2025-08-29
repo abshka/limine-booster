@@ -73,7 +73,6 @@ while read -r line; do
             removed_kernels+=("${kernel_dir}")
         fi
     elif [[ "${line}" =~ usr/lib/firmware/ ]] || \
-         [[ "${line}" =~ usr/lib/initcpio/ ]] || \
          [[ "${line}" =~ usr/src/.*/dkms\.conf ]] || \
          [[ "${line}" =~ usr/lib/modules/.*/extramodules/ ]]; then
         # System-wide changes that affect all installed kernels
