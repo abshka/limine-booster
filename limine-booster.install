@@ -1,0 +1,14 @@
+post_install() {
+    echo ">>> [limine-booster] Installation complete!"
+    echo ">>> [limine-booster] Run 'sudo limine-booster-update' to generate boot entries."
+}
+
+post_upgrade() {
+    echo ">>> [limine-booster] Package upgraded successfully!"
+    echo ">>> [limine-booster] Run 'sudo limine-booster-update' to update boot entries."
+}
+
+pre_remove() {
+    echo ">>> [limine-booster] Removing all limine-booster entries..."
+    echo ">>> [limine-booster] Boot entries will be cleaned up automatically."
+}
