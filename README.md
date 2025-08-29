@@ -1,6 +1,6 @@
 # Limine Booster
 
-A zero-configuration, automated tool to manage Limine bootloader entries for Arch Linux kernels with support for both Booster and mkinitcpio initramfs.
+A zero-configuration, automated tool to manage Limine bootloader entries for Arch Linux kernels with Booster initramfs.
 
 This tool provides a pacman hook that automatically creates and updates Limine entries for all installed kernels, using the command line from your currently running system. No manual configuration is required.
 
@@ -38,30 +38,54 @@ That's it. The tool will automatically create entries in your `/boot/limine.conf
 The tool creates entries compatible with `limine-snapper-sync`:
 
 - A main entry: `/+Arch Linux` with machine-id comment for automatic OS detection
-- Sub-entries for each kernel: `//kernel-name kernel-version (initramfs-type)`
+- Sub-entries for each kernel: `//kernel-name kernel-version`
 
-For example, after installing the `linux-lts` package with both Booster and mkinitcpio available, you'll see:
+For example, after installing the `linux-lts` package, you'll see:
 
 ```
 /+Arch Linux
     comment: machine-id=your-machine-id
 
-//linux-lts 6.6.52-1-lts (Booster)
+//linux-lts 6.6.52-1-lts
     protocol: linux
     comment: Auto-generated for linux-lts 6.6.52-1-lts (Booster)
     kernel_path: boot():/machine-id/linux-lts/vmlinuz-linux-lts
     module_path: boot():/intel-ucode.img
     module_path: boot():/machine-id/linux-lts/booster-linux-lts.img
     kernel_cmdline: your-kernel-parameters
-
-//linux-lts 6.6.52-1-lts (mkinitcpio)
-    protocol: linux
-    comment: Auto-generated for linux-lts 6.6.52-1-lts (mkinitcpio)
-    kernel_path: boot():/machine-id/linux-lts/vmlinuz-linux-lts
-    module_path: boot():/intel-ucode.img
-    module_path: boot():/machine-id/linux-lts/initramfs-linux-lts.img
-    kernel_cmdline: your-kernel-parameters
 ```
+
+## Included Commands
+
+**limine-booster** includes its own implementation of essential Limine commands:
+
+- **limine-enroll-config**: Enroll Limine configuration into UEFI binary
+- **limine-reset-enroll**: Reset enrolled configuration from UEFI binary
+
+These commands are compatible with `limine-snapper-sync` and provide full independence from other packages.
+
+### Configuration Enrollment
+
+Configuration enrollment allows embedding the Limine config directly into the EFI binary for enhanced security:
+
+```bash
+# Enable enrollment (disabled by default for safety)
+export ENABLE_ENROLL_LIMINE_CONFIG=yes
+
+# Enroll current config into Limine binary
+sudo limine-enroll-config
+
+# Reset enrolled config (remove embedded config)
+sudo limine-reset-enroll
+```
+
+**Path Detection**: The commands automatically detect Limine binary location:
+
+1. `/boot/EFI/Limine/limine_x64.efi` (preferred)
+2. `/boot/EFI/BOOT/BOOTX64.EFI` (fallback)
+3. `/boot/BOOTX64.EFI` (legacy)
+
+You can override with: `LIMINE_BINARY_PATH=/custom/path limine-enroll-config`
 
 ### limine-snapper-sync Integration
 
@@ -86,76 +110,11 @@ By default, the script uses the command line from `/proc/cmdline`. You can speci
 CMDLINE_OVERRIDE="root=UUID=... rw quiet"
 ```
 
-**Control Initramfs Types:**
-
-You can control which initramfs types to generate entries for:
-
-```ini
-# Generate entries for both booster and mkinitcpio (default)
-INITRAMFS_TYPES="auto"
-
-# Only generate Booster entries
-INITRAMFS_TYPES="booster"
-
-# Only generate mkinitcpio entries
-INITRAMFS_TYPES="mkinitcpio"
-
-# Force both types (even if one is missing)
-INITRAMFS_TYPES="both"
-```
-
-**Entry Naming:**
-
-Control whether initramfs type is appended to entry names:
-
-```ini
-# Append type when multiple initramfs available (default)
-APPEND_INITRAMFS_TYPE="yes"
-
-# Use simple names (may cause conflicts)
-APPEND_INITRAMFS_TYPE="no"
-```
-
-## Working with limine-mkinitcpio-hook
-
-**Important**: Keep `limine-mkinitcpio-hook` installed for proper snapshot functionality, but disable its conflicting hook:
-
-### Step 1: Install limine-mkinitcpio-hook (if not already installed)
-
-```bash
-sudo pacman -S limine-mkinitcpio-hook
-```
-
-### Step 2: Disable the conflicting hook
-
-```bash
-sudo mv /etc/pacman.d/hooks/90-mkinitcpio-install.hook /etc/pacman.d/hooks/90-mkinitcpio-install.hook.disabled
-```
-
-### Why this approach?
-
-- **limine-mkinitcpio-hook** provides essential commands (`limine-reset-enroll`, `limine-enroll-config`) needed by `limine-snapper-sync`
-- **The hook conflict** causes duplicate entry management, leading to malformed boot configurations
-- **Disabling only the hook** keeps the tools available while letting `limine-booster` handle entry creation
-
-The unified `limine-booster` now handles both Booster and mkinitcpio initramfs generation automatically, while `limine-mkinitcpio-hook` provides the snapshot infrastructure.
-
 ## Troubleshooting
 
-### limine-snapper-sync Errors
+### limine-snapper-sync Integration
 
-When running `limine-snapper-sync`, you may see these errors:
-
-```
-bash: line 1: limine-reset-enroll: command not found
-bash: line 1: limine-enroll-config: command not found
-```
-
-If you see these errors, it usually means `limine-mkinitcpio-hook` is not installed. Install it following the migration guide above. If you still see these errors after installation, they can be **safely ignored** as the core snapshot functionality works perfectly. The important message is:
-
-```
-Saved successfully: /boot/limine.conf
-```
+This tool is fully compatible with `limine-snapper-sync` for BTRFS snapshot integration. The included `limine-enroll-config` and `limine-reset-enroll` commands provide full support for snapshot functionality without requiring additional packages.
 
 ### AUR Kernel Support
 
