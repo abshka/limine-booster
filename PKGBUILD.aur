@@ -10,7 +10,6 @@ depends=('booster' 'limine')
 optdepends=('intel-ucode: For automatic detection and inclusion of Intel microcode'
             'amd-ucode: For automatic detection and inclusion of AMD microcode'
             'limine-snapper-sync: For BTRFS snapshot integration')
-install=limine-booster.install
 source=("$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
@@ -41,9 +40,6 @@ package() {
 
     # Install the pacman hook
     install -Dm644 "91-limine-booster.hook" "$pkgdir/usr/share/libalpm/hooks/91-limine-booster.hook"
-
-    # Install the install script
-    install -Dm644 "limine-booster.install" "$pkgdir/usr/share/libalpm/scripts/limine-booster.install"
 }
 
 # vim: set ts=4 sw=4 et:
