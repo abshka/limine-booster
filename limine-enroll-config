@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# limine-enroll-config - Enroll Limine configuration into binary
+# Part of limine-booster project
+#
+
+set -euo pipefail
+
+# Constants
+readonly SCRIPT_NAME="limine-enroll-config"
+readonly CONFIG_PATH="/boot/limine.conf"
+readonly DEFAULT_BINARY_PATH="/boot/EFI/Limine/limine_x64.efi"
+
+# Logging
+log_info() { printf ">>> [%s] %s\n" "${SCRIPT_NAME}" "$1"; }
+log_error() { printf "!!! [%s] ERROR: %s\n" "${SCRIPT_NAME}" "$1" >&2; exit 1; }
+
+# Check if system is x86_64
+is_x64() {
+    [[ "$(uname -m)" == "x86_64" ]]
+}
+
+# Check if system is using UEFI
+check_uefi() {
+    [[ -d /sys/firmware/efi ]]
+}
+
+# Main function
+main() {
+    # Check prerequisites
+    if ! is_x64; then
+        log_info "Not running on x86_64, skipping enrollment"
+        exit 0
+    fi
+
+    if ! check_uefi; then
+        log_info "Not running on UEFI system, skipping enrollment"
+        exit 0
+    fi
+
+    # Check if limine command exists
+    if ! command -v limine &>/dev/null; then
+        log_error "limine command not found. Please install limine package."
+    fi
+
+    # Determine binary path - try multiple common locations
+    local binary_path="${LIMINE_BINARY_PATH:-}"
+    
+    if [[ -z "${binary_path}" ]]; then
+        # Try common Limine binary locations
+        if [[ -f "/boot/EFI/Limine/limine_x64.efi" ]]; then
+            binary_path="/boot/EFI/Limine/limine_x64.efi"
+        elif [[ -f "/boot/EFI/BOOT/BOOTX64.EFI" ]]; then
+            binary_path="/boot/EFI/BOOT/BOOTX64.EFI"
+        elif [[ -f "/boot/BOOTX64.EFI" ]]; then
+            binary_path="/boot/BOOTX64.EFI"
+        else
+            log_error "Limine binary not found in common locations. Set LIMINE_BINARY_PATH environment variable."
+        fi
+    fi
+
+    if [[ ! -f "${binary_path}" ]]; then
+        log_error "Limine binary not found: ${binary_path}"
+    fi
+
+    if [[ ! -f "${CONFIG_PATH}" ]]; then
+        log_error "Limine config not found: ${CONFIG_PATH}"
+    fi
+
+    # Check if enrollment is enabled (default: no for safety)
+    if [[ "${ENABLE_ENROLL_LIMINE_CONFIG:-no}" != "yes" ]]; then
+        log_info "Config enrollment disabled. Set ENABLE_ENROLL_LIMINE_CONFIG=yes to enable."
+        exit 0
+    fi
+
+    log_info "Enrolling config into Limine binary..."
+
+    # Calculate config hash
+    local config_hash
+    if ! config_hash=$(b2sum "${CONFIG_PATH}" 2>/dev/null | awk '{print $1}'); then
+        log_error "Failed to calculate config hash"
+    fi
+
+    # Enroll the config
+    if ! limine enroll-config "${binary_path}" "${config_hash}"; then
+        log_error "Failed to enroll config '${CONFIG_PATH}' into '${binary_path}'"
+    fi
+
+    log_info "Successfully enrolled config into ${binary_path}"
+    sync
+}
+
+main "$@"

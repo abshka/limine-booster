@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# limine-reset-enroll - Reset enrolled Limine configuration
+# Part of limine-booster project
+#
+
+set -euo pipefail
+
+# Constants
+readonly SCRIPT_NAME="limine-reset-enroll"
+readonly DEFAULT_BINARY_PATH="/boot/EFI/Limine/limine_x64.efi"
+
+# Logging
+log_info() { printf ">>> [%s] %s\n" "${SCRIPT_NAME}" "$1"; }
+log_error() { printf "!!! [%s] ERROR: %s\n" "${SCRIPT_NAME}" "$1" >&2; exit 1; }
+
+# Check if system is x86_64
+is_x64() {
+    [[ "$(uname -m)" == "x86_64" ]]
+}
+
+# Check if system is using UEFI
+check_uefi() {
+    [[ -d /sys/firmware/efi ]]
+}
+
+# Main function
+main() {
+    # Check prerequisites
+    if ! is_x64; then
+        log_info "Not running on x86_64, skipping reset"
+        exit 0
+    fi
+
+    if ! check_uefi; then
+        log_info "Not running on UEFI system, skipping reset"
+        exit 0
+    fi
+
+    # Check if limine command exists
+    if ! command -v limine &>/dev/null; then
+        log_error "limine command not found. Please install limine package."
+    fi
+
+    # Determine binary path - try multiple common locations
+    local binary_path="${LIMINE_BINARY_PATH:-}"
+    
+    if [[ -z "${binary_path}" ]]; then
+        # Try common Limine binary locations
+        if [[ -f "/boot/EFI/Limine/limine_x64.efi" ]]; then
+            binary_path="/boot/EFI/Limine/limine_x64.efi"
+        elif [[ -f "/boot/EFI/BOOT/BOOTX64.EFI" ]]; then
+            binary_path="/boot/EFI/BOOT/BOOTX64.EFI"
+        elif [[ -f "/boot/BOOTX64.EFI" ]]; then
+            binary_path="/boot/BOOTX64.EFI"
+        else
+            log_error "Limine binary not found in common locations. Set LIMINE_BINARY_PATH environment variable."
+        fi
+    fi
+
+    if [[ ! -f "${binary_path}" ]]; then
+        log_error "Limine binary not found: ${binary_path}"
+    fi
+
+    log_info "Resetting enrolled config in Limine binary..."
+
+    # Reset the enrolled config
+    if ! limine enroll-config --reset "${binary_path}" --quiet; then
+        log_error "Failed to reset enrolled config for '${binary_path}'"
+    fi
+
+    log_info "Successfully reset enrolled config in ${binary_path}"
+    sync
+}
+
+main "$@"
