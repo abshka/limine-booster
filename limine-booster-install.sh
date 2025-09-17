@@ -94,6 +94,41 @@ if command -v mutex_lock &> /dev/null; then
     mutex_lock "limine-booster-install"
 fi
 
+# Clean up any existing duplicate files in /boot root from previous installations
+cleanup_existing_duplicates() {
+    echo ">>> [limine-booster] Cleaning up existing duplicate files..."
+
+    # Find all booster and vmlinuz files in /boot root that might be duplicates
+    for booster_file in /boot/booster-*.img; do
+        if [[ -f "${booster_file}" ]]; then
+            local pkg_name=$(basename "${booster_file}" | sed 's/^booster-//' | sed 's/\.img$//')
+            local organized_file="/boot/${MACHINE_ID}/${pkg_name}/booster-${pkg_name}.img"
+
+            # If organized version exists, remove the duplicate
+            if [[ -f "${organized_file}" ]]; then
+                echo "Removing duplicate booster file: ${booster_file}"
+                rm -f "${booster_file}" 2>/dev/null || echo "WARNING: Failed to remove ${booster_file}"
+            fi
+        fi
+    done
+
+    for vmlinuz_file in /boot/vmlinuz-*; do
+        if [[ -f "${vmlinuz_file}" ]]; then
+            local pkg_name=$(basename "${vmlinuz_file}" | sed 's/^vmlinuz-//')
+            local organized_file="/boot/${MACHINE_ID}/${pkg_name}/vmlinuz-${pkg_name}"
+
+            # If organized version exists, remove the duplicate
+            if [[ -f "${organized_file}" ]]; then
+                echo "Removing duplicate vmlinuz file: ${vmlinuz_file}"
+                rm -f "${vmlinuz_file}" 2>/dev/null || echo "WARNING: Failed to remove ${vmlinuz_file}"
+            fi
+        fi
+    done
+}
+
+# Clean up existing duplicates
+cleanup_existing_duplicates
+
 # Reset limine enroll config if available
 if command -v reset_enroll_config &> /dev/null; then
     reset_enroll_config
@@ -173,7 +208,7 @@ for line in "${kernel_targets[@]}"; do
     if [[ " ${removed_kernels[*]} " =~ " ${line} " ]]; then
         continue
     fi
-    
+
     # Skip if pkgbase file is not owned by any package
     if ! pacman -Qqo "${line}/pkgbase" &>/dev/null; then
         continue
@@ -186,7 +221,7 @@ for line in "${kernel_targets[@]}"; do
 
     pkgBase="$(<"${line}/pkgbase")"
     kVer="${line##*/}"
-    
+
     # Validate extracted data
     if [[ -z "${pkgBase}" || -z "${kVer}" ]]; then
         echo "WARNING: Invalid package or kernel version data for ${line}" >&2
@@ -194,7 +229,7 @@ for line in "${kernel_targets[@]}"; do
     fi
 
     kDirPath="${ESP_PATH}/${MACHINE_ID}/${pkgBase}"
-    
+
     booster_path="${kDirPath}/booster-${pkgBase}.img"
     vmlinuz_path="${kDirPath}/vmlinuz-${pkgBase}"
 
@@ -203,7 +238,7 @@ for line in "${kernel_targets[@]}"; do
         echo "ERROR: Failed to create kernel directory: ${kDirPath}" >&2
         continue
     fi
-    
+
     # Copy kernel image to boot directory
     if ! install -Dm600 "${line}/vmlinuz" "${vmlinuz_path}"; then
         echo "ERROR: Failed to install kernel: ${vmlinuz_path}" >&2
@@ -211,13 +246,13 @@ for line in "${kernel_targets[@]}"; do
     fi
 
     echo "Building Booster initramfs for ${pkgBase} (${kVer})"
-    
+
     # Build Booster initramfs image
     if ! booster build --force --kernel-version "${kVer}" "${booster_path}"; then
         echo "ERROR: Booster build failed for kernel ${kVer}" >&2
         continue
     fi
-    
+
     # Update Limine configuration with proper entry management
     if [[ ${process_all} -eq 1 ]]; then
         # System-wide changes: process all kernels at once
@@ -231,9 +266,23 @@ for line in "${kernel_targets[@]}"; do
             echo "ERROR: Failed to update Limine entry for ${pkgBase}" >&2
         fi
     fi
-    
+
     echo "Kernel stored in: ${vmlinuz_path}"
     echo "Booster initramfs stored in: ${booster_path}"
+
+    # Clean up duplicate files created by standard booster hooks in /boot root
+    duplicate_booster="/boot/booster-${pkgBase}.img"
+    duplicate_vmlinuz="/boot/vmlinuz-${pkgBase}"
+
+    if [[ -f "${duplicate_booster}" ]]; then
+        echo "Removing duplicate booster file: ${duplicate_booster}"
+        rm -f "${duplicate_booster}" 2>/dev/null || echo "WARNING: Failed to remove ${duplicate_booster}"
+    fi
+
+    if [[ -f "${duplicate_vmlinuz}" ]]; then
+        echo "Removing duplicate vmlinuz file: ${duplicate_vmlinuz}"
+        rm -f "${duplicate_vmlinuz}" 2>/dev/null || echo "WARNING: Failed to remove ${duplicate_vmlinuz}"
+    fi
 done
 
 # Enroll limine config if available

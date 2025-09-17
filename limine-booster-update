@@ -569,6 +569,21 @@ remove_kernel_entry() {
             log_warning "Failed to remove directory: ${dest_dir}"
         fi
     fi
+
+    # Clean up any duplicate files in /boot root that might exist from old installations
+    local duplicate_booster="/boot/booster-${pkg_name}.img"
+    local duplicate_vmlinuz="/boot/vmlinuz-${pkg_name}"
+    local duplicate_initramfs="/boot/initramfs-${pkg_name}.img"
+    local duplicate_initramfs_fallback="/boot/initramfs-${pkg_name}-fallback.img"
+    
+    for duplicate_file in "${duplicate_booster}" "${duplicate_vmlinuz}" "${duplicate_initramfs}" "${duplicate_initramfs_fallback}"; do
+        if [[ -f "${duplicate_file}" ]]; then
+            log_info "Removing duplicate file: ${duplicate_file}"
+            if ! rm -f "${duplicate_file}" 2>/dev/null; then
+                log_warning "Failed to remove duplicate file: ${duplicate_file}"
+            fi
+        fi
+    done
 }
 
 # --- Main Function ---
