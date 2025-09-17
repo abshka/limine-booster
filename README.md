@@ -16,6 +16,7 @@ The generated entries are fully compatible with `limine-snapper-sync` for BTRFS 
 - **Smart Cmdline Detection:** Uses the command line from your running system (`/proc/cmdline`) for new entries.
 - **Automatic Microcode Detection:** Includes Intel/AMD microcode if available.
 - **Enhanced AUR Support:** Robust detection and handling of AUR kernels with advanced pattern matching.
+- **Duplicate File Cleanup:** Automatically removes duplicate booster/vmlinuz files from `/boot` root, maintaining only the organized machine-ID structure.
 
 ## Installation
 
