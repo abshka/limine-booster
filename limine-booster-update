@@ -373,7 +373,7 @@ process_kernel_package() {
     # Setup paths
     local dest_dir_rel="/${MACHINE_ID}/${pkg_name}"
     local dest_dir_abs="/boot${dest_dir_rel}"
-    local kernel_source="/boot/vmlinuz-${pkg_name}"
+    local kernel_source="/usr/lib/modules/${kernel_version}/vmlinuz"
     local kernel_dest="${dest_dir_abs}/vmlinuz-${pkg_name}"
 
     # Create destination directory
