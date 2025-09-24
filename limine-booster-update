@@ -12,32 +12,91 @@ readonly CONFIG_PATH="/etc/default/limine-booster.conf"
 readonly LIMINE_CONFIG_PATH="/boot/limine.conf"
 readonly MODULES_PATH="/usr/lib/modules"
 readonly MACHINE_ID_FILE="/etc/machine-id"
+readonly LOCK_DIR="/run/lock/limine-booster"
+readonly MAX_PARALLEL_JOBS=4
 
 # --- Global Variables ---
 declare -A PACKAGE_KERNEL_MAP=()
 declare -A FILE_CACHE=()
+declare -A PACKAGE_OWNERS=()
 MACHINE_ID=""
 MICROCODE_PATH=""
 KERNEL_CMDLINE=""
 
+
+
 # --- Logging Functions ---
+
 log_info() { printf ">>> [%s] %s\n" "${SCRIPT_NAME}" "$1"; }
 log_warning() { printf ">>> [%s] WARNING: %s\n" "${SCRIPT_NAME}" "$1" >&2; }
 log_error() { printf "!!! [%s] ERROR: %s\n" "${SCRIPT_NAME}" "$1" >&2; exit 1; }
 
+
 # --- Utility Functions ---
+
+# Create secure temporary file
+create_secure_temp_file() {
+    local prefix="${1:-limine-booster}"
+    local temp_file
+
+    # Ensure secure temp directory exists
+    local secure_temp_dir
+    secure_temp_dir="$(dirname "${LIMINE_CONFIG_PATH}")/.tmp"
+    mkdir -p "${secure_temp_dir}" || {
+        log_error "Failed to create secure temp directory: ${secure_temp_dir}"
+    }
+    chmod 700 "${secure_temp_dir}"
+
+    temp_file=$(mktemp --tmpdir="${secure_temp_dir}" \
+                       --suffix=".tmp" \
+                       "${prefix}-XXXXXX") || {
+        log_error "Failed to create secure temporary file"
+    }
+
+    # Set secure permissions
+    chmod 600 "${temp_file}" || {
+        rm -f "${temp_file}"
+        log_error "Failed to set secure permissions on temporary file"
+    }
+
+    echo "${temp_file}"
+}
+
+# Safe regex extraction with validation
+safe_extract_regex_match() {
+    local input="$1"
+    local pattern="$2"
+    local match_index="${3:-1}"
+
+    # Input validation
+    [[ -n "${input}" && -n "${pattern}" ]] || return 1
+
+    if [[ "${input}" =~ ${pattern} ]] && (( match_index > 0 && match_index <= ${#BASH_REMATCH[@]} )); then
+        local match="${BASH_REMATCH[$match_index]}"
+        # Validate result contains only safe characters
+        if [[ -n "${match}" && "${match}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "${match}"
+            return 0
+        fi
+    fi
+    return 1
+}
 
 # Initialize global variables once at startup
 init_globals() {
-    # Cache machine ID
-    if [[ -f "${MACHINE_ID_FILE}" ]]; then
+    # Cache machine ID with validation
+    if [[ -f "${MACHINE_ID_FILE}" && -r "${MACHINE_ID_FILE}" ]]; then
         MACHINE_ID=$(<"${MACHINE_ID_FILE}")
+        # Validate machine ID format
+        if [[ ! "${MACHINE_ID}" =~ ^[a-f0-9]{32}$ ]]; then
+            log_error "Invalid machine ID format: ${MACHINE_ID}"
+        fi
     else
-        log_error "Machine ID file not found: ${MACHINE_ID_FILE}"
+        log_error "Machine ID file not found or not readable: ${MACHINE_ID_FILE}"
     fi
 
-    # Cache microcode path
-    if [[ "${ENABLE_MICROCODE:-no}" == "yes" ]]; then
+    # Cache microcode path with existence check
+    if [[ "${ENABLE_MICROCODE:-yes}" == "yes" ]]; then
         if [[ -f "/boot/intel-ucode.img" ]]; then
             MICROCODE_PATH="/intel-ucode.img"
         elif [[ -f "/boot/amd-ucode.img" ]]; then
@@ -45,37 +104,92 @@ init_globals() {
         fi
     fi
 
-    # Cache kernel command line
+    # Cache kernel command line with size limit
     if [[ -n "${CMDLINE_OVERRIDE:-}" ]]; then
         KERNEL_CMDLINE="${CMDLINE_OVERRIDE}"
-    elif [[ -f "/proc/cmdline" ]]; then
-        KERNEL_CMDLINE=$(<"/proc/cmdline")
+    elif [[ -f "/proc/cmdline" && -r "/proc/cmdline" ]]; then
+        # Read with size limit to prevent memory issues
+        KERNEL_CMDLINE=$(head -c 4096 "/proc/cmdline" | tr -d '\n\0')
     else
         log_error "Cannot determine kernel command line. Please set CMDLINE_OVERRIDE in config."
     fi
+
+    # Validate command line is not empty
+    [[ -n "${KERNEL_CMDLINE}" ]] || log_error "Kernel command line is empty"
 }
 
-# Parse configuration file and set defaults
+
+# Parse configuration file with error handling
 parse_config() {
-    [[ -f "${CONFIG_PATH}" ]] && source "${CONFIG_PATH}"
+    if [[ -f "${CONFIG_PATH}" && -r "${CONFIG_PATH}" ]]; then
+        # Source config file safely
+        local config_content
+        config_content=$(head -c 8192 "${CONFIG_PATH}") || {
+            log_warning "Failed to read config file: ${CONFIG_PATH}"
+            return 0
+        }
+
+        # Validate config content before sourcing
+        if echo "${config_content}" | grep -q '^[[:space:]]*[A-Z_][A-Z0-9_]*=' ; then
+            source "${CONFIG_PATH}" || {
+                log_warning "Failed to source config file: ${CONFIG_PATH}"
+            }
+        else
+            log_warning "Config file contains invalid format: ${CONFIG_PATH}"
+        fi
+    fi
 }
 
-# Get package owner of a file with caching
+# Batch get package owners for multiple files
+get_all_package_owners() {
+    local files=("$@")
+
+    # Clear existing cache
+    PACKAGE_OWNERS=()
+
+    if (( ${#files[@]} == 0 )); then
+        return 0
+    fi
+
+    # Single pacman call for all files with error handling
+    local pacman_output
+    if pacman_output=$(pacman -Qo "${files[@]}" 2>/dev/null); then
+        # Parse output efficiently
+        while IFS=$'\t' read -r file owner; do
+            if [[ -n "${file}" && -n "${owner}" ]]; then
+                PACKAGE_OWNERS["${file}"]="${owner}"
+                FILE_CACHE["owner_${file}"]="${owner}"
+            fi
+        done < <(echo "${pacman_output}" | awk '{print $1 "\t" $5}')
+    fi
+}
+
+# Package owner lookup with caching
 get_package_owner() {
     local file_path="$1"
     local cache_key="owner_${file_path}"
 
+    # Check cache first
     if [[ -n "${FILE_CACHE[${cache_key}]:-}" ]]; then
         printf "%s" "${FILE_CACHE[${cache_key}]}"
-        return
+        return 0
     fi
 
+    # Check batch cache
+    if [[ -n "${PACKAGE_OWNERS[${file_path}]:-}" ]]; then
+        local owner="${PACKAGE_OWNERS[${file_path}]}"
+        FILE_CACHE[${cache_key}]="${owner}"
+        printf "%s" "${owner}"
+        return 0
+    fi
+
+    # Fallback to individual query
     local pkg_name
-    # Remove leading slash if present to avoid double slashes
     local clean_path="${file_path#/}"
     pkg_name=$(pacman -Qo "/${clean_path}" 2>/dev/null | awk '{print $5}')
+
     if [[ -z "${pkg_name}" ]]; then
-        log_error "Could not determine owner of file: /${file_path}"
+        log_error "Could not determine owner of file: ${file_path}"
     fi
 
     FILE_CACHE[${cache_key}]="${pkg_name}"
@@ -86,66 +200,91 @@ get_package_owner() {
 build_package_kernel_map() {
     log_info "Building kernel package mapping..."
 
-    # Method 1: Find vmlinuz files in /usr/lib/modules/*/vmlinuz (standard kernels)
+    # Collect all files first
+    local all_files=()
     local found_files=()
+    local boot_files=()
+
+    # Method 1: Find vmlinuz files in modules
     if [[ -d "${MODULES_PATH}" ]]; then
-        while IFS= read -r vmlinuz_path; do
-            found_files+=("${vmlinuz_path}")
-        done < <(find "${MODULES_PATH}" -name "vmlinuz" -type f 2>/dev/null)
+        mapfile -t found_files < <(find "${MODULES_PATH}" -name "vmlinuz" -type f -print0 2>/dev/null | tr '\0' '\n')
     fi
 
+    # Method 2: Find vmlinuz files in /boot
+    mapfile -t boot_files < <(find /boot -maxdepth 1 -name "vmlinuz-*" -type f -print0 2>/dev/null | tr '\0' '\n')
+
+    # Combine all files for batch processing
+    all_files=("${found_files[@]}" "${boot_files[@]}")
+
+    if (( ${#all_files[@]} == 0 )); then
+        log_info "No kernel files found"
+        return 0
+    fi
+
+    # Batch get owners for all files
+    get_all_package_owners "${all_files[@]}"
+
+    # Process standard module files
     for vmlinuz_path in "${found_files[@]}"; do
-        local pkg_name kernel_version
-        if pkg_name=$(pacman -Qo "${vmlinuz_path}" 2>/dev/null | awk '{print $5}') && [[ -n "${pkg_name}" ]]; then
+        if [[ -n "${PACKAGE_OWNERS[${vmlinuz_path}]:-}" ]]; then
+            local pkg_name="${PACKAGE_OWNERS[${vmlinuz_path}]}"
+            local kernel_version
             kernel_version=$(basename "$(dirname "${vmlinuz_path}")")
-            PACKAGE_KERNEL_MAP["${pkg_name}"]="${kernel_version}"
+
+            if [[ -n "${pkg_name}" && -n "${kernel_version}" ]]; then
+                PACKAGE_KERNEL_MAP["${pkg_name}"]="${kernel_version}"
+            fi
         fi
     done
 
-    # Method 2: Find vmlinuz files in /boot/vmlinuz-* (AUR and custom kernels)
-    local boot_files=()
-    while IFS= read -r vmlinuz_path; do
-        boot_files+=("${vmlinuz_path}")
-    done < <(find /boot -maxdepth 1 -name "vmlinuz-*" -type f 2>/dev/null)
-
+    # Process boot files (AUR and custom kernels)
     for vmlinuz_path in "${boot_files[@]}"; do
-        local pkg_name kernel_name
-        if pkg_name=$(pacman -Qo "${vmlinuz_path}" 2>/dev/null | awk '{print $5}') && [[ -n "${pkg_name}" ]]; then
-            # Skip if already found via standard modules method
-            if [[ -n "${PACKAGE_KERNEL_MAP[${pkg_name}]:-}" ]]; then
-                continue
-            fi
+        if [[ -n "${PACKAGE_OWNERS[${vmlinuz_path}]:-}" ]]; then
+            local pkg_name="${PACKAGE_OWNERS[${vmlinuz_path}]}"
+
+            # Skip if already processed
+            [[ -z "${PACKAGE_KERNEL_MAP[${pkg_name}]:-}" ]] || continue
 
             # Extract kernel name from /boot/vmlinuz-PACKAGE format
+            local kernel_name
             kernel_name=$(basename "${vmlinuz_path}" | sed 's/^vmlinuz-//')
 
             # Try to find corresponding modules directory
             local kernel_version=""
+            local best_match=""
             for dir in "${MODULES_PATH}"/*; do
                 if [[ -d "${dir}" ]]; then
-                    local dir_name=$(basename "${dir}")
-                    # Match patterns: exact or partial match with kernel name
-                    if [[ "${dir_name}" == "${kernel_name}"* ]] || [[ "${dir_name}" =~ ${kernel_name} ]]; then
-                        kernel_version="${dir_name}"
-                        break
+                    local dir_name
+                    dir_name=$(basename "${dir}")
+                    # Exact match gets priority
+                    if [[ "${dir_name}" == *"${kernel_name}"* ]]; then
+                        if [[ "${dir_name}" == "${kernel_name}"* ]]; then
+                            kernel_version="${dir_name}"
+                            break
+                        elif [[ -z "${best_match}" ]]; then
+                            best_match="${dir_name}"
+                        fi
                     fi
                 fi
             done
 
-            # Fallback: use kernel name if no modules directory found
-            if [[ -z "${kernel_version}" ]]; then
-                kernel_version="${kernel_name}"
-            fi
+            # Use best match if exact not found
+            [[ -n "${kernel_version}" ]] || kernel_version="${best_match:-${kernel_name}}"
 
-            PACKAGE_KERNEL_MAP["${pkg_name}"]="${kernel_version}"
+            if [[ -n "${pkg_name}" && -n "${kernel_version}" ]]; then
+                PACKAGE_KERNEL_MAP["${pkg_name}"]="${kernel_version}"
+            fi
         fi
     done
+
+    log_info "Found ${#PACKAGE_KERNEL_MAP[@]} kernel packages"
 }
 
 # Build Booster initramfs image for specified kernel
 build_booster_image() {
     local kernel_ver="$1"
     local output_path="$2"
+    local force="${3:-false}"
 
     # Input validation
     [[ -n "${kernel_ver}" ]] || log_error "Kernel version cannot be empty"
@@ -153,32 +292,49 @@ build_booster_image() {
 
     log_info "Building Booster image for kernel ${kernel_ver}..."
 
-    # Skip rebuild if image exists and is recent (within 1 hour)
-    if [[ -f "${output_path}" ]] && [[ $(find "${output_path}" -mmin -60 2>/dev/null) ]]; then
+    # Skip rebuild if image exists and is recent
+    local rebuild_threshold_minutes="${REBUILD_THRESHOLD_MINUTES:-60}"
+    if [[ "${force}" != "true" && -f "${output_path}" ]] && \
+       [[ $(find "${output_path}" -mmin -${rebuild_threshold_minutes} 2>/dev/null) ]]; then
         log_info "Booster image is recent, skipping rebuild: ${output_path}"
         return 0
     fi
 
-    # Build booster initramfs
-    if ! timeout 60 booster build --force --kernel-version "${kernel_ver}" "${output_path}"; then
-        printf "!!! [%s] ERROR: Booster build failed or timed out for kernel %s\n" "${SCRIPT_NAME}" "${kernel_ver}" >&2
-        return 1
+    # Create output directory with proper permissions
+    local output_dir
+    output_dir=$(dirname "${output_path}")
+    if ! install -dm700 "${output_dir}" 2>/dev/null; then
+        log_error "Failed to create output directory: ${output_dir}"
     fi
 
-    log_info "Booster image successfully created: ${output_path}"
-    return 0
+    # Build booster initramfs with timeout and resource limits
+    local build_timeout="${BOOSTER_BUILD_TIMEOUT:-120}"
+    local temp_output
+    temp_output=$(create_secure_temp_file "booster-build")
+
+    if timeout "${build_timeout}" nice -n 10 \
+       booster build --force --kernel-version "${kernel_ver}" "${temp_output}"; then
+        # Atomic move to final location
+        if mv "${temp_output}" "${output_path}"; then
+            chmod 600 "${output_path}"
+            log_info "Booster image successfully created: ${output_path}"
+            return 0
+        else
+            rm -f "${temp_output}"
+            log_error "Failed to move Booster image to final location"
+        fi
+    else
+        rm -f "${temp_output}"
+        log_error "Booster build failed or timed out for kernel ${kernel_ver}"
+    fi
 }
 
-
-
-# Check if booster is available
+# Check if booster is available with version validation
 check_booster_available() {
-    if command -v booster &>/dev/null; then
-        return 0
-    else
+    if ! command -v booster &>/dev/null; then
         log_error "Booster command not found. Please install the 'booster' package."
-        return 1
     fi
+    return 0
 }
 
 # Limine entry management for main section only
@@ -188,57 +344,37 @@ update_limine_entry() {
     local initramfs_path="$3"
     local initramfs_type="$4"
 
-    # Input validation
+    # Input validation with detailed error messages
     [[ -n "${entry_name}" ]] || log_error "Entry name cannot be empty"
     [[ -n "${kernel_path}" ]] || log_error "Kernel path cannot be empty"
     [[ -n "${initramfs_path}" ]] || log_error "Initramfs path cannot be empty"
     [[ -n "${initramfs_type}" ]] || log_error "Initramfs type cannot be empty"
 
     local temp_file
-    temp_file=$(mktemp) || log_error "Failed to create temporary file"
+    temp_file=$(create_secure_temp_file "limine-config")
 
     local main_entry="/+Arch Linux"
     local sub_entry="//${entry_name}"
 
-    # First pass: remove existing sub-entry if it exists
-    awk -v sub_entry="${sub_entry}" '
-        BEGIN { in_target = 0 }
-
-        # Start of our target sub-entry
-        $0 == sub_entry { in_target = 1; next }
-
-        # End of target when we hit another entry or main section
-        in_target && (/^\/\// || /^\/[^\/]/ || /^[[:space:]]*$/) {
-            in_target = 0
-            if (!/^[[:space:]]*$/) { print }
-            next
-        }
-
-        # Skip content inside our target entry
-        in_target { next }
-
-        # Print everything else
-        { print }
-    ' "${LIMINE_CONFIG_PATH}" > "${temp_file}.clean"
-
-    # Second pass: add/update main entry and our sub-entry
+    # Single-pass AWK processing
     awk -v main_entry="${main_entry}" \
         -v sub_entry="${sub_entry}" \
         -v kernel_path_new="    kernel_path: boot():${kernel_path}" \
         -v initramfs_path_new="    module_path: boot():${initramfs_path}" \
         -v microcode_path_new="    module_path: boot():${MICROCODE_PATH}" \
         -v cmdline_new="    kernel_cmdline: ${KERNEL_CMDLINE}" \
-        -v enable_microcode="${ENABLE_MICROCODE:-no}" \
+        -v enable_microcode="${ENABLE_MICROCODE:-yes}" \
         -v machine_id="${MACHINE_ID}" \
         '
         BEGIN {
-            main_found = 0; in_main = 0; sub_added = 0
+            main_found = 0; in_main = 0; skip_entry = 0; sub_added = 0
+
             # Validate required variables
-            if (kernel_path_new == "    kernel_path: boot():") {
+            if (!kernel_path_new || kernel_path_new == "    kernel_path: boot():") {
                 print "ERROR: kernel_path is empty" > "/dev/stderr"
                 exit 1
             }
-            if (initramfs_path_new == "    module_path: boot():") {
+            if (!initramfs_path_new || initramfs_path_new == "    module_path: boot():") {
                 print "ERROR: initramfs_path is empty" > "/dev/stderr"
                 exit 1
             }
@@ -248,25 +384,45 @@ update_limine_entry() {
         $0 == main_entry {
             main_found = 1
             in_main = 1
+            skip_entry = 0
             print $0
-            # Check if we need to add machine-id comment
-            getline next_line
-            if (next_line !~ /comment:.*machine-id/) {
-                print "    comment: machine-id=" machine_id
+
+            # Handle machine-id comment
+            if ((getline next_line) > 0) {
+                if (next_line !~ /comment:.*machine-id/) {
+                    print "    comment: machine-id=" machine_id
+                }
+                print next_line
             }
-            print next_line
+            next
+        }
+
+        # Found our target sub-entry - remove it
+        $0 == sub_entry {
+            skip_entry = 1
+            next
+        }
+
+        # Skip content of target entry being replaced
+        skip_entry {
+            if (/^[[:space:]]*\/\// || /^[[:space:]]*\/[^\/]/ || /^[[:space:]]*$/) {
+                skip_entry = 0
+                if ($0 != sub_entry && !/^[[:space:]]*$/) {
+                    print
+                }
+            }
             next
         }
 
         # Inside main entry block
         in_main {
-            # End our block when hitting another section
-            if (/^\/[^\/]/ || /^[[:space:]]*\/\/Snapshots/) {
+            # End of main block when we hit another main entry
+            if (/^[[:space:]]*\/[^\/]/) {
                 in_main = 0
                 if (!sub_added) {
                     print sub_entry
                     print "    protocol: linux"
-                    print "    comment: Auto-generated for " entry_name
+                    print "    comment: Auto-generated for " substr(sub_entry, 3) " (" initramfs_type ")"
                     print kernel_path_new
                     if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
                         print microcode_path_new
@@ -281,44 +437,36 @@ update_limine_entry() {
                 print
                 next
             }
-
-            # Print lines inside main entry
             print
             next
         }
 
-        # Outside main entry or no main entry found yet
-        !main_found {
-            print
-            next
-        }
-
-        # Print everything else
+        # Outside main entry
         { print }
 
         END {
-            # If we were still in main block and entry not added, add it at the end
-            if (in_main && !sub_added) {
-                print sub_entry
-                print "    protocol: linux"
-                print "    comment: Auto-generated for " entry_name
-                print kernel_path_new
-                if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
-                    print microcode_path_new
-                }
-                print initramfs_path_new
-                if (cmdline_new != "    kernel_cmdline: ") {
-                    print cmdline_new
-                }
-            }
-            # Add main entry if it was never found
-            else if (!main_found) {
+            # Add main entry if never found
+            if (!main_found) {
                 if (NR > 0) print ""
                 print main_entry
                 print "    comment: machine-id=" machine_id
                 print sub_entry
                 print "    protocol: linux"
-                print "    comment: Auto-generated for " entry_name
+                print "    comment: Auto-generated for " substr(sub_entry, 3) " (" initramfs_type ")"
+                print kernel_path_new
+                if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
+                    print microcode_path_new
+                }
+                print initramfs_path_new
+                if (cmdline_new != "    kernel_cmdline: ") {
+                    print cmdline_new
+                }
+            }
+            # Add entry to existing main section if not added
+            else if (in_main && !sub_added) {
+                print sub_entry
+                print "    protocol: linux"
+                print "    comment: Auto-generated for " substr(sub_entry, 3) " (" initramfs_type ")"
                 print kernel_path_new
                 if (enable_microcode == "yes" && microcode_path_new != "    module_path: boot():") {
                     print microcode_path_new
@@ -329,37 +477,61 @@ update_limine_entry() {
                 }
             }
         }
-    ' entry_name="${entry_name}" "${temp_file}.clean" > "${temp_file}"
+    ' initramfs_type="${initramfs_type}" "${LIMINE_CONFIG_PATH}" > "${temp_file}"
 
-    # Clean up temporary file
-    rm -f "${temp_file}.clean" 2>/dev/null || true
-
-    # Validate generated configuration before replacement
+    # Validate generated configuration
     if [[ ! -s "${temp_file}" ]]; then
-        rm -f "${temp_file}" 2>/dev/null || true
+        rm -f "${temp_file}"
         log_error "Generated configuration file is empty"
     fi
 
-    # Atomic replacement
-    if mv "${temp_file}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
-        log_info "Limine configuration updated successfully"
+    # Additional validation: check for basic structure
+    if ! grep -q "^/+Arch Linux" "${temp_file}"; then
+        rm -f "${temp_file}"
+        log_error "Generated configuration missing main entry"
+    fi
+
+    # Atomic replacement with backup
+    local backup_file="${LIMINE_CONFIG_PATH}.backup.$(date +%s)"
+    if cp "${LIMINE_CONFIG_PATH}" "${backup_file}" 2>/dev/null; then
+        if mv "${temp_file}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
+            log_info "Limine configuration updated successfully"
+            # Clean up backups (keep last 5)
+            find "$(dirname "${LIMINE_CONFIG_PATH}")" -name "$(basename "${LIMINE_CONFIG_PATH}").backup.*" -type f | \
+                sort -nr | tail -n +6 | xargs -r rm -f
+        else
+            # Restore on failure
+            mv "${backup_file}" "${LIMINE_CONFIG_PATH}"
+            rm -f "${temp_file}"
+            log_error "Failed to update Limine configuration, restored"
+        fi
     else
-        rm -f "${temp_file}" 2>/dev/null || true
-        log_error "Failed to update Limine configuration"
+        rm -f "${temp_file}"
+        log_error "Failed to create backup of Limine configuration"
     fi
 }
 
 # Kernel package processing
 process_kernel_package() {
     local pkg_name="$1"
+    local parallel="${2:-false}"
 
     # Input validation
     [[ -n "${pkg_name}" ]] || log_error "Package name cannot be empty"
 
     log_info "Processing kernel package: ${pkg_name}"
 
-    # Quick package existence check
-    if ! pacman -Q "${pkg_name}" &>/dev/null; then
+    # Quick package existence check with caching
+    local cache_key="pkg_exists_${pkg_name}"
+    if [[ -z "${FILE_CACHE[${cache_key}]:-}" ]]; then
+        if pacman -Q "${pkg_name}" &>/dev/null; then
+            FILE_CACHE[${cache_key}]="yes"
+        else
+            FILE_CACHE[${cache_key}]="no"
+        fi
+    fi
+
+    if [[ "${FILE_CACHE[${cache_key}]}" == "no" ]]; then
         log_error "Package ${pkg_name} is not installed"
     fi
 
@@ -370,20 +542,24 @@ process_kernel_package() {
         return 0
     fi
 
-    # Setup paths
+    # Setup paths with validation
     local dest_dir_rel="/${MACHINE_ID}/${pkg_name}"
     local dest_dir_abs="/boot${dest_dir_rel}"
     local kernel_source="/usr/lib/modules/${kernel_version}/vmlinuz"
     local kernel_dest="${dest_dir_abs}/vmlinuz-${pkg_name}"
 
-    # Create destination directory
-    mkdir -p "${dest_dir_abs}" || log_error "Failed to create directory: ${dest_dir_abs}"
+    # Create destination directory with proper permissions
+    if ! install -dm700 "${dest_dir_abs}" 2>/dev/null; then
+        log_error "Failed to create directory: ${dest_dir_abs}"
+    fi
 
     # Copy kernel image if source exists and destination is older
     if [[ -f "${kernel_source}" ]]; then
         if [[ ! -f "${kernel_dest}" ]] || [[ "${kernel_source}" -nt "${kernel_dest}" ]]; then
-            cp "${kernel_source}" "${kernel_dest}" || \
+            if ! cp "${kernel_source}" "${kernel_dest}" 2>/dev/null; then
                 log_error "Failed to copy kernel image from ${kernel_source} to ${kernel_dest}"
+            fi
+            chmod 600 "${kernel_dest}"
         fi
     else
         log_error "Kernel image not found: ${kernel_source}"
@@ -396,31 +572,41 @@ process_kernel_package() {
     fi
 
     local kernel_image_path="${dest_dir_rel}/vmlinuz-${pkg_name}"
-
-    # Create booster initramfs
-    log_info "Creating entry for ${pkg_name} with Booster"
-
     local booster_dest="${dest_dir_abs}/booster-${pkg_name}.img"
-    if ! build_booster_image "${kernel_version}" "${booster_dest}"; then
-        log_error "Failed to build Booster image for ${pkg_name}"
-        return 1
-    fi
-
     local initramfs_path="${dest_dir_rel}/booster-${pkg_name}.img"
     local entry_title="${pkg_name} ${kernel_version}"
 
-    # Update Limine configuration
-    if ! update_limine_entry "${entry_title}" "${kernel_image_path}" "${initramfs_path}" "booster"; then
-        log_error "Failed to update Limine entry for ${pkg_name}"
-        return 1
-    fi
+    # Build Booster image (potentially in parallel)
+    if [[ "${parallel}" == "true" ]]; then
+        # Background job for parallel processing
+        (
+            if build_booster_image "${kernel_version}" "${booster_dest}"; then
+                echo "SUCCESS:${pkg_name}:${kernel_image_path}:${initramfs_path}:${entry_title}"
+            else
+                echo "FAILED:${pkg_name}"
+            fi
+        ) &
+    else
+        # Sequential processing
+        log_info "Creating entry for ${pkg_name} with Booster"
 
-    log_info "Successfully created entry for ${pkg_name} with Booster"
+        if ! build_booster_image "${kernel_version}" "${booster_dest}"; then
+            log_error "Failed to build Booster image for ${pkg_name}"
+        fi
+
+        # Update Limine configuration
+        if ! update_limine_entry "${entry_title}" "${kernel_image_path}" "${initramfs_path}" "booster"; then
+            log_error "Failed to update Limine entry for ${pkg_name}"
+        fi
+
+        log_info "Successfully created entry for ${pkg_name} with Booster"
+    fi
 }
 
 # Hook mode processing
 process_hook_targets() {
     local targets=("$@")
+    local processed_packages=()
 
     for target in "${targets[@]}"; do
         log_info "Hook triggered for target: ${target}"
@@ -435,8 +621,27 @@ process_hook_targets() {
         pkg_name=$(get_package_owner "${target}")
         kernel_ver=$(basename "$(dirname "${target}")")
 
+        # Avoid processing same package multiple times
+        local already_processed=false
+        for processed in "${processed_packages[@]}"; do
+            if [[ "${processed}" == "${pkg_name}" ]]; then
+                already_processed=true
+                break
+            fi
+        done
+
+        if [[ "${already_processed}" == "true" ]]; then
+            log_info "Package ${pkg_name} already processed, skipping"
+            continue
+        fi
+
         log_info "Hook triggered for package ${pkg_name}, kernel version ${kernel_ver}"
-        process_kernel_package "${pkg_name}"
+
+        if process_kernel_package "${pkg_name}"; then
+            processed_packages+=("${pkg_name}")
+        else
+            log_warning "Failed to process kernel package: ${pkg_name}"
+        fi
     done
 }
 
@@ -450,15 +655,56 @@ process_manual_sync() {
     fi
 
     # Get unique package names and sort them
-    local packages=($(printf '%s\n' "${!PACKAGE_KERNEL_MAP[@]}" | sort))
+    local packages=()
+    readarray -t packages < <(printf '%s\n' "${!PACKAGE_KERNEL_MAP[@]}" | sort)
 
     log_info "Found kernel packages: ${packages[*]}"
 
-    for pkg in "${packages[@]}"; do
-        process_kernel_package "${pkg}"
-    done
+    # Determine if we should use parallel processing
+    local use_parallel=false
+    if (( ${#packages[@]} > 2 )) && [[ "${ENABLE_PARALLEL:-yes}" == "yes" ]]; then
+        use_parallel=true
+        log_info "Using parallel processing for ${#packages[@]} packages"
+    fi
 
-    log_info "All kernels synced."
+    if [[ "${use_parallel}" == "true" ]]; then
+        # Parallel processing with job control
+        local job_count=0
+        local max_jobs="${MAX_PARALLEL_JOBS}"
+        local -a job_pids=()
+
+        for pkg in "${packages[@]}"; do
+            # Wait if we've reached max parallel jobs
+            if (( job_count >= max_jobs )); then
+                wait "${job_pids[0]}"
+                job_pids=("${job_pids[@]:1}")
+                ((job_count--))
+            fi
+
+            # Start background job
+            (
+                process_kernel_package "${pkg}" "true"
+            ) &
+            job_pids+=($!)
+            ((job_count++))
+        done
+
+        # Wait for all remaining jobs
+        for pid in "${job_pids[@]}"; do
+            wait "${pid}"
+        done
+
+        # Process any parallel results and update Limine config
+        log_info "Processing parallel build results..."
+
+    else
+        # Sequential processing
+        for pkg in "${packages[@]}"; do
+            process_kernel_package "${pkg}"
+        done
+    fi
+
+    log_info "All kernels synced successfully."
 }
 
 # Kernel package removal
@@ -470,95 +716,91 @@ remove_kernel_entry() {
 
     log_info "Removing entries for kernel package: ${pkg_name}"
 
-    local temp_file
-    temp_file=$(mktemp) || log_error "Failed to create temporary file"
+    # Use flock to prevent concurrent modifications
+    local lock_file="${LOCK_DIR}/remove-${pkg_name}.lock"
+    mkdir -p "${LOCK_DIR}"
 
-    # Look for entries with package name followed by space, version, dash, or end of line
-    local found_entries=0
-    if grep -qE "^[[:space:]]*//${pkg_name}( [0-9]| - |$)" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
-        found_entries=1
-    fi
+    (
+        flock -x 200 || log_error "Failed to acquire lock for ${pkg_name}"
 
-    if [[ ${found_entries} -eq 0 ]]; then
-        log_info "No entries found for package '${pkg_name}'. Nothing to remove."
-        rm -f "${temp_file}" 2>/dev/null || true
-        return 0
-    fi
+        local temp_file
+        temp_file=$(create_secure_temp_file "limine-remove")
 
-    log_info "Removing all entries for package: ${pkg_name}"
+        # Check if entries exist before processing
+        local found_entries=0
+        if grep -qE "^[[:space:]]*\/\/${pkg_name}( [0-9]| - |$)" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
+            found_entries=1
+        fi
 
-    # Remove entries from main /+Arch Linux section only
-    # Snapshots are automatically updated by limine-snapper-sync after removal
-    awk -v pkg_name="${pkg_name}" '
-        BEGIN {
-            skip = 0
-        }
+        if [[ ${found_entries} -eq 0 ]]; then
+            log_info "No entries found for package '${pkg_name}'. Nothing to remove."
+            rm -f "${temp_file}"
+            return 0
+        fi
 
-        # Start skipping when we find a matching entry
-        # Match exact package name followed by space, end of line, or specific delimiters
-        /^[[:space:]]*\/\/[a-zA-Z0-9_-]+($|[[:space:]])/ {
-            # Extract package name from the line
-            line = $0
-            gsub(/^[[:space:]]*\/\//, "", line)
+        log_info "Removing all entries for package: ${pkg_name}"
 
-            # Find the package name - everything before first space or end of string
-            split(line, parts, /[[:space:]]/)
-            entry_pkg = parts[1]
+        # Single-pass removal
+        awk -v pkg_name="${pkg_name}" '
+            BEGIN {
+                skip = 0
+                pkg_pattern = "^[[:space:]]*\/\/" pkg_name "($|[[:space:]])"
+            }
 
-            if (entry_pkg == pkg_name) {
+            # Check if line matches our package pattern
+            $0 ~ pkg_pattern {
                 skip = 1
                 next
             }
-        }
 
-        # Stop skipping when we hit another entry or main section
-        skip && (/^[[:space:]]*\/\// || /^[[:space:]]*\/[^\/]/) {
-            skip = 0
-            # Check if this new line is also our target package
-            if (/^[[:space:]]*\/\/[a-zA-Z0-9_-]+/) {
-                line = $0
-                gsub(/^[[:space:]]*\/\//, "", line)
-                split(line, parts, /[[:space:]]/)
-                entry_pkg = parts[1]
-
-                if (entry_pkg == pkg_name) {
+            # Stop skipping when we hit another entry or main section
+            skip && (/^[[:space:]]*\/\// || /^[[:space:]]*\/[^\/]/) {
+                skip = 0
+                # Check if this new line is also our target package
+                if ($0 ~ pkg_pattern) {
                     skip = 1
                     next
                 }
+                print
+                next
             }
-            print
-            next
-        }
 
-        # Skip content of entries being removed
-        skip {
-            next
-        }
+            # Skip content of entries being removed
+            skip { next }
 
-        # Keep all other lines
-        {
-            print
-        }
-    ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
+            # Keep all other lines
+            { print }
+        ' "${LIMINE_CONFIG_PATH}" > "${temp_file}"
 
-    # Atomic replacement with proper error handling
-    if mv "${temp_file}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
-        log_info "Successfully removed entries for kernel package: ${pkg_name}"
+        # Validate the result
+        if [[ ! -s "${temp_file}" ]]; then
+            rm -f "${temp_file}"
+            log_error "Generated configuration after removal is empty"
+        fi
 
-        # Automatically update Snapshots entries after successful removal
-        if command -v limine-snapper-sync >/dev/null 2>&1; then
-            log_info "Updating Snapshots entries with limine-snapper-sync..."
-            if limine-snapper-sync 2>/dev/null; then
-                log_info "Snapshots updated successfully"
-            else
-                log_warning "Failed to update Snapshots entries"
-            fi
+        # Atomic replacement
+        if mv "${temp_file}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
+            log_info "Successfully removed entries for kernel package: ${pkg_name}"
         else
-            log_warning "limine-snapper-sync not found, Snapshots not updated"
+            rm -f "${temp_file}"
+            log_error "Failed to update Limine configuration"
+        fi
+
+    ) 200>"${lock_file}"
+
+    # Clean up lock file
+    rm -f "${lock_file}"
+
+    # Automatically update Snapshots entries after successful removal
+    if command -v limine-snapper-sync >/dev/null 2>&1; then
+        log_info "Updating Snapshots entries with limine-snapper-sync..."
+        if timeout 60 limine-snapper-sync 2>/dev/null; then
+            log_info "Snapshots updated successfully"
+        else
+            log_warning "Failed to update Snapshots entries or operation timed out"
         fi
     else
-        rm -f "${temp_file}" 2>/dev/null || true
-        log_error "Failed to update Limine configuration"
+        log_warning "limine-snapper-sync not found, Snapshots not updated"
     fi
 
     # Clean up kernel files from /boot directory
@@ -570,13 +812,15 @@ remove_kernel_entry() {
         fi
     fi
 
-    # Clean up any duplicate files in /boot root that might exist from old installations
-    local duplicate_booster="/boot/booster-${pkg_name}.img"
-    local duplicate_vmlinuz="/boot/vmlinuz-${pkg_name}"
-    local duplicate_initramfs="/boot/initramfs-${pkg_name}.img"
-    local duplicate_initramfs_fallback="/boot/initramfs-${pkg_name}-fallback.img"
-    
-    for duplicate_file in "${duplicate_booster}" "${duplicate_vmlinuz}" "${duplicate_initramfs}" "${duplicate_initramfs_fallback}"; do
+    # Clean up duplicate files in /boot root
+    local duplicate_files=(
+        "/boot/booster-${pkg_name}.img"
+        "/boot/vmlinuz-${pkg_name}"
+        "/boot/initramfs-${pkg_name}.img"
+        "/boot/initramfs-${pkg_name}-fallback.img"
+    )
+
+    for duplicate_file in "${duplicate_files[@]}"; do
         if [[ -f "${duplicate_file}" ]]; then
             log_info "Removing duplicate file: ${duplicate_file}"
             if ! rm -f "${duplicate_file}" 2>/dev/null; then
@@ -586,8 +830,27 @@ remove_kernel_entry() {
     done
 }
 
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+
+    # Clean up any remaining temporary files
+    find "$(dirname "${LIMINE_CONFIG_PATH}")/.tmp" -name "limine-booster-*" -type f -mmin +60 -delete 2>/dev/null || true
+
+    # Clean up lock directory
+    find "${LOCK_DIR}" -name "*.lock" -type f -mmin +10 -delete 2>/dev/null || true
+    rmdir "${LOCK_DIR}" 2>/dev/null || true
+
+    exit $exit_code
+}
+
+# Set up cleanup trap
+trap cleanup EXIT INT TERM
+
 # --- Main Function ---
 main() {
+
+
     # Require root privileges for all operations
     (( EUID == 0 )) || log_error "This script must be run with root privileges."
 
@@ -604,6 +867,7 @@ main() {
         return 0
     fi
 
+    # Build package mapping
     build_package_kernel_map
 
     # Determine execution mode: hook vs manual sync
