@@ -86,7 +86,24 @@ if [[ ${has_system_changes} -eq 1 ]] || [[ ${#kernel_targets[@]} -eq 0 && ${has_
     process_all=1
     kernel_targets=(/usr/lib/modules/*)
 elif [[ ${has_kernel_changes} -eq 1 ]]; then
-    echo ">>> [limine-booster] Kernel-specific changes detected, processing ${#kernel_targets[@]} kernels..."
+    # Count only non-removed kernels
+    local active_kernel_count=0
+    for kt in "${kernel_targets[@]}"; do
+        local is_removed=false
+        for rk in "${removed_kernels[@]}"; do
+            if [[ "${kt}" == "${rk}" ]]; then
+                is_removed=true
+                break
+            fi
+        done
+        if [[ "${is_removed}" == "false" ]]; then
+            ((active_kernel_count++))
+        fi
+    done
+    
+    if [[ ${active_kernel_count} -gt 0 ]]; then
+        echo ">>> [limine-booster] Kernel-specific changes detected, processing ${active_kernel_count} kernel(s)..."
+    fi
 fi
 
 # Use limine mutex lock if available
@@ -106,8 +123,8 @@ cleanup_existing_duplicates() {
 
             # If organized version exists, remove the duplicate
             if [[ -f "${organized_file}" ]]; then
-                echo "Removing duplicate booster file: ${booster_file}"
-                rm -f "${booster_file}" 2>/dev/null || echo "WARNING: Failed to remove ${booster_file}"
+                echo ">>> [limine-booster] Removing duplicate: ${booster_file}"
+                rm -f "${booster_file}" 2>/dev/null || echo ">>> [limine-booster] WARNING: Failed to remove ${booster_file}"
             fi
         fi
     done
@@ -119,8 +136,8 @@ cleanup_existing_duplicates() {
 
             # If organized version exists, remove the duplicate
             if [[ -f "${organized_file}" ]]; then
-                echo "Removing duplicate vmlinuz file: ${vmlinuz_file}"
-                rm -f "${vmlinuz_file}" 2>/dev/null || echo "WARNING: Failed to remove ${vmlinuz_file}"
+                echo ">>> [limine-booster] Removing duplicate: ${vmlinuz_file}"
+                rm -f "${vmlinuz_file}" 2>/dev/null || echo ">>> [limine-booster] WARNING: Failed to remove ${vmlinuz_file}"
             fi
         fi
     done
@@ -139,8 +156,7 @@ for removed_dir in "${removed_kernels[@]}"; do
     if [[ -n "${removed_dir}" && -n "${removed_dir##*/}" ]]; then
         # Extract kernel version from directory path
         kVer="${removed_dir##*/}"
-        echo "Removing entries for deleted kernel: ${kVer}"
-
+        
         # Determine package name for the removed kernel
         pkgBase=""
         # First try: check if pkgbase file still exists
@@ -191,13 +207,13 @@ for removed_dir in "${removed_kernels[@]}"; do
         fi
 
         if [[ -n "${pkgBase}" ]]; then
-            echo "Detected removed package: ${pkgBase}"
+            echo ">>> [limine-booster] Removing old kernel version ${kVer} for package ${pkgBase}"
             # Remove Limine entries and clean up files
             if ! /usr/bin/limine-booster-remove "${pkgBase}" 2>/dev/null; then
-                echo "WARNING: Failed to clean up entry for ${pkgBase}" >&2
+                echo ">>> [limine-booster] WARNING: Failed to clean up entry for ${pkgBase}" >&2
             fi
         else
-            echo "WARNING: Could not determine package name for removed kernel: ${kVer}" >&2
+            echo ">>> [limine-booster] WARNING: Could not determine package name for removed kernel: ${kVer}" >&2
         fi
     fi
 done
@@ -215,7 +231,7 @@ for line in "${kernel_targets[@]}"; do
     fi
 
     if [[ ! -f "${line}/pkgbase" ]]; then
-        echo "WARNING: pkgbase file missing for ${line}" >&2
+        echo ">>> [limine-booster] WARNING: pkgbase file missing for ${line}" >&2
         continue
     fi
 
@@ -224,7 +240,7 @@ for line in "${kernel_targets[@]}"; do
 
     # Validate extracted data
     if [[ -z "${pkgBase}" || -z "${kVer}" ]]; then
-        echo "WARNING: Invalid package or kernel version data for ${line}" >&2
+        echo ">>> [limine-booster] WARNING: Invalid package or kernel version data for ${line}" >&2
         continue
     fi
 
@@ -235,21 +251,21 @@ for line in "${kernel_targets[@]}"; do
 
     # Create kernel directory with secure permissions
     if ! install -dm700 "${kDirPath}"; then
-        echo "ERROR: Failed to create kernel directory: ${kDirPath}" >&2
+        echo ">>> [limine-booster] ERROR: Failed to create kernel directory: ${kDirPath}" >&2
         continue
     fi
 
     # Copy kernel image to boot directory
     if ! install -Dm600 "${line}/vmlinuz" "${vmlinuz_path}"; then
-        echo "ERROR: Failed to install kernel: ${vmlinuz_path}" >&2
+        echo ">>> [limine-booster] ERROR: Failed to install kernel: ${vmlinuz_path}" >&2
         continue
     fi
 
-    echo "Building Booster initramfs for ${pkgBase} (${kVer})"
+    echo ">>> [limine-booster] Building Booster initramfs for ${pkgBase} (${kVer})"
 
     # Build Booster initramfs image
     if ! booster build --force --kernel-version "${kVer}" "${booster_path}"; then
-        echo "ERROR: Booster build failed for kernel ${kVer}" >&2
+        echo ">>> [limine-booster] ERROR: Booster build failed for kernel ${kVer}" >&2
         continue
     fi
 
@@ -257,31 +273,31 @@ for line in "${kernel_targets[@]}"; do
     if [[ ${process_all} -eq 1 ]]; then
         # System-wide changes: process all kernels at once
         if ! /usr/bin/limine-booster-update 2>/dev/null; then
-            echo "ERROR: Failed to update Limine entries" >&2
+            echo ">>> [limine-booster] ERROR: Failed to update Limine entries" >&2
         fi
         break  # Only need to run once for all kernels
     else
         # Kernel-specific changes: process individual kernel
         if ! /usr/bin/limine-booster-update "${line}/vmlinuz" 2>/dev/null; then
-            echo "ERROR: Failed to update Limine entry for ${pkgBase}" >&2
+            echo ">>> [limine-booster] ERROR: Failed to update Limine entry for ${pkgBase}" >&2
         fi
     fi
 
-    echo "Kernel stored in: ${vmlinuz_path}"
-    echo "Booster initramfs stored in: ${booster_path}"
+    echo ">>> [limine-booster] Kernel stored in: ${vmlinuz_path}"
+    echo ">>> [limine-booster] Booster initramfs stored in: ${booster_path}"
 
     # Clean up duplicate files created by standard booster hooks in /boot root
     duplicate_booster="/boot/booster-${pkgBase}.img"
     duplicate_vmlinuz="/boot/vmlinuz-${pkgBase}"
 
     if [[ -f "${duplicate_booster}" ]]; then
-        echo "Removing duplicate booster file: ${duplicate_booster}"
-        rm -f "${duplicate_booster}" 2>/dev/null || echo "WARNING: Failed to remove ${duplicate_booster}"
+        echo ">>> [limine-booster] Removing duplicate: ${duplicate_booster}"
+        rm -f "${duplicate_booster}" 2>/dev/null || echo ">>> [limine-booster] WARNING: Failed to remove ${duplicate_booster}"
     fi
 
     if [[ -f "${duplicate_vmlinuz}" ]]; then
-        echo "Removing duplicate vmlinuz file: ${duplicate_vmlinuz}"
-        rm -f "${duplicate_vmlinuz}" 2>/dev/null || echo "WARNING: Failed to remove ${duplicate_vmlinuz}"
+        echo ">>> [limine-booster] Removing duplicate: ${duplicate_vmlinuz}"
+        rm -f "${duplicate_vmlinuz}" 2>/dev/null || echo ">>> [limine-booster] WARNING: Failed to remove ${duplicate_vmlinuz}"
     fi
 done
 

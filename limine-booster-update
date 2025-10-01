@@ -13,7 +13,6 @@ readonly LIMINE_CONFIG_PATH="/boot/limine.conf"
 readonly MODULES_PATH="/usr/lib/modules"
 readonly MACHINE_ID_FILE="/etc/machine-id"
 readonly LOCK_DIR="/run/lock/limine-booster"
-readonly MAX_PARALLEL_JOBS=4
 
 # --- Global Variables ---
 declare -A PACKAGE_KERNEL_MAP=()
@@ -62,26 +61,6 @@ create_secure_temp_file() {
     echo "${temp_file}"
 }
 
-# Safe regex extraction with validation
-safe_extract_regex_match() {
-    local input="$1"
-    local pattern="$2"
-    local match_index="${3:-1}"
-
-    # Input validation
-    [[ -n "${input}" && -n "${pattern}" ]] || return 1
-
-    if [[ "${input}" =~ ${pattern} ]] && (( match_index > 0 && match_index <= ${#BASH_REMATCH[@]} )); then
-        local match="${BASH_REMATCH[$match_index]}"
-        # Validate result contains only safe characters
-        if [[ -n "${match}" && "${match}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-            echo "${match}"
-            return 0
-        fi
-    fi
-    return 1
-}
-
 # Initialize global variables once at startup
 init_globals() {
     # Cache machine ID with validation
@@ -89,7 +68,7 @@ init_globals() {
         MACHINE_ID=$(<"${MACHINE_ID_FILE}")
         # Validate machine ID format
         if [[ ! "${MACHINE_ID}" =~ ^[a-f0-9]{32}$ ]]; then
-            log_error "Invalid machine ID format: ${MACHINE_ID}"
+            log_error "Invalid machine ID format: ${MACHINE_ID}. Try: systemd-machine-id-setup"
         fi
     else
         log_error "Machine ID file not found or not readable: ${MACHINE_ID_FILE}"
@@ -350,8 +329,15 @@ update_limine_entry() {
     [[ -n "${initramfs_path}" ]] || log_error "Initramfs path cannot be empty"
     [[ -n "${initramfs_type}" ]] || log_error "Initramfs type cannot be empty"
 
-    local temp_file
-    temp_file=$(create_secure_temp_file "limine-config")
+    # Use flock to prevent concurrent modifications
+    local lock_file="${LOCK_DIR}/update-limine.lock"
+    mkdir -p "${LOCK_DIR}"
+
+    (
+        flock -x 200 || log_error "Failed to acquire lock for limine config update"
+
+        local temp_file
+        temp_file=$(create_secure_temp_file "limine-config")
 
     local main_entry="/+Arch Linux"
     local sub_entry="//${entry_name}"
@@ -509,29 +495,24 @@ update_limine_entry() {
         rm -f "${temp_file}"
         log_error "Failed to create backup of Limine configuration"
     fi
+
+    ) 200>"${lock_file}"
+
+    # Clean up lock file
+    rm -f "${lock_file}"
 }
 
 # Kernel package processing
 process_kernel_package() {
     local pkg_name="$1"
-    local parallel="${2:-false}"
 
     # Input validation
     [[ -n "${pkg_name}" ]] || log_error "Package name cannot be empty"
 
     log_info "Processing kernel package: ${pkg_name}"
 
-    # Quick package existence check with caching
-    local cache_key="pkg_exists_${pkg_name}"
-    if [[ -z "${FILE_CACHE[${cache_key}]:-}" ]]; then
-        if pacman -Q "${pkg_name}" &>/dev/null; then
-            FILE_CACHE[${cache_key}]="yes"
-        else
-            FILE_CACHE[${cache_key}]="no"
-        fi
-    fi
-
-    if [[ "${FILE_CACHE[${cache_key}]}" == "no" ]]; then
+    # Quick package existence check
+    if ! pacman -Q "${pkg_name}" &>/dev/null; then
         log_error "Package ${pkg_name} is not installed"
     fi
 
@@ -576,31 +557,19 @@ process_kernel_package() {
     local initramfs_path="${dest_dir_rel}/booster-${pkg_name}.img"
     local entry_title="${pkg_name} ${kernel_version}"
 
-    # Build Booster image (potentially in parallel)
-    if [[ "${parallel}" == "true" ]]; then
-        # Background job for parallel processing
-        (
-            if build_booster_image "${kernel_version}" "${booster_dest}"; then
-                echo "SUCCESS:${pkg_name}:${kernel_image_path}:${initramfs_path}:${entry_title}"
-            else
-                echo "FAILED:${pkg_name}"
-            fi
-        ) &
-    else
-        # Sequential processing
-        log_info "Creating entry for ${pkg_name} with Booster"
+    # Sequential processing
+    log_info "Creating entry for ${pkg_name} with Booster"
 
-        if ! build_booster_image "${kernel_version}" "${booster_dest}"; then
-            log_error "Failed to build Booster image for ${pkg_name}"
-        fi
-
-        # Update Limine configuration
-        if ! update_limine_entry "${entry_title}" "${kernel_image_path}" "${initramfs_path}" "booster"; then
-            log_error "Failed to update Limine entry for ${pkg_name}"
-        fi
-
-        log_info "Successfully created entry for ${pkg_name} with Booster"
+    if ! build_booster_image "${kernel_version}" "${booster_dest}"; then
+        log_error "Failed to build Booster image for ${pkg_name}"
     fi
+
+    # Update Limine configuration
+    if ! update_limine_entry "${entry_title}" "${kernel_image_path}" "${initramfs_path}" "booster"; then
+        log_error "Failed to update Limine entry for ${pkg_name}"
+    fi
+
+    log_info "Successfully created entry for ${pkg_name} with Booster"
 }
 
 # Hook mode processing
@@ -609,11 +578,8 @@ process_hook_targets() {
     local processed_packages=()
 
     for target in "${targets[@]}"; do
-        log_info "Hook triggered for target: ${target}"
-
         # Pattern check for kernel files
         if [[ ! "${target}" =~ usr/lib/modules/.*/vmlinuz ]]; then
-            log_info "Target ${target} is not a kernel, skipping"
             continue
         fi
 
@@ -631,11 +597,10 @@ process_hook_targets() {
         done
 
         if [[ "${already_processed}" == "true" ]]; then
-            log_info "Package ${pkg_name} already processed, skipping"
             continue
         fi
 
-        log_info "Hook triggered for package ${pkg_name}, kernel version ${kernel_ver}"
+        log_info "Processing package ${pkg_name}, kernel version ${kernel_ver}"
 
         if process_kernel_package "${pkg_name}"; then
             processed_packages+=("${pkg_name}")
@@ -660,49 +625,10 @@ process_manual_sync() {
 
     log_info "Found kernel packages: ${packages[*]}"
 
-    # Determine if we should use parallel processing
-    local use_parallel=false
-    if (( ${#packages[@]} > 2 )) && [[ "${ENABLE_PARALLEL:-yes}" == "yes" ]]; then
-        use_parallel=true
-        log_info "Using parallel processing for ${#packages[@]} packages"
-    fi
-
-    if [[ "${use_parallel}" == "true" ]]; then
-        # Parallel processing with job control
-        local job_count=0
-        local max_jobs="${MAX_PARALLEL_JOBS}"
-        local -a job_pids=()
-
-        for pkg in "${packages[@]}"; do
-            # Wait if we've reached max parallel jobs
-            if (( job_count >= max_jobs )); then
-                wait "${job_pids[0]}"
-                job_pids=("${job_pids[@]:1}")
-                ((job_count--))
-            fi
-
-            # Start background job
-            (
-                process_kernel_package "${pkg}" "true"
-            ) &
-            job_pids+=($!)
-            ((job_count++))
-        done
-
-        # Wait for all remaining jobs
-        for pid in "${job_pids[@]}"; do
-            wait "${pid}"
-        done
-
-        # Process any parallel results and update Limine config
-        log_info "Processing parallel build results..."
-
-    else
-        # Sequential processing
-        for pkg in "${packages[@]}"; do
-            process_kernel_package "${pkg}"
-        done
-    fi
+    # Sequential processing
+    for pkg in "${packages[@]}"; do
+        process_kernel_package "${pkg}"
+    done
 
     log_info "All kernels synced successfully."
 }
@@ -713,8 +639,6 @@ remove_kernel_entry() {
 
     # Input validation
     [[ -n "${pkg_name}" ]] || log_error "Package name cannot be empty"
-
-    log_info "Removing entries for kernel package: ${pkg_name}"
 
     # Use flock to prevent concurrent modifications
     local lock_file="${LOCK_DIR}/remove-${pkg_name}.lock"
@@ -733,12 +657,12 @@ remove_kernel_entry() {
         fi
 
         if [[ ${found_entries} -eq 0 ]]; then
-            log_info "No entries found for package '${pkg_name}'. Nothing to remove."
+            log_info "No entries found for package '${pkg_name}'"
             rm -f "${temp_file}"
             return 0
         fi
 
-        log_info "Removing all entries for package: ${pkg_name}"
+        log_info "Removing entries for kernel package: ${pkg_name}"
 
         # Single-pass removal
         awk -v pkg_name="${pkg_name}" '
@@ -779,9 +703,7 @@ remove_kernel_entry() {
         fi
 
         # Atomic replacement
-        if mv "${temp_file}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
-            log_info "Successfully removed entries for kernel package: ${pkg_name}"
-        else
+        if ! mv "${temp_file}" "${LIMINE_CONFIG_PATH}" 2>/dev/null; then
             rm -f "${temp_file}"
             log_error "Failed to update Limine configuration"
         fi
@@ -837,8 +759,15 @@ cleanup() {
     # Clean up any remaining temporary files
     find "$(dirname "${LIMINE_CONFIG_PATH}")/.tmp" -name "limine-booster-*" -type f -mmin +60 -delete 2>/dev/null || true
 
-    # Clean up lock directory
-    find "${LOCK_DIR}" -name "*.lock" -type f -mmin +10 -delete 2>/dev/null || true
+    # Clean up stale lock files (only if not held by running process)
+    if [[ -d "${LOCK_DIR}" ]]; then
+        for lock in "${LOCK_DIR}"/*.lock; do
+            [[ -f "${lock}" ]] || continue
+            # Check if lock is held by running process
+            flock -n -x "${lock}" true 2>/dev/null && rm -f "${lock}"
+        done
+    fi
+    # Remove directory if empty
     rmdir "${LOCK_DIR}" 2>/dev/null || true
 
     exit $exit_code
